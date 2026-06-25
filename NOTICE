@@ -1,0 +1,38 @@
+HermesCloak
+Copyright 2026
+
+Licensed under the Apache License, Version 2.0 (the "License").
+
+The HermesCloak core has no heavy dependencies (plain Python + PyYAML, MIT).
+
+----------------------------------------------------------------------
+OPTIONAL dependency — the `[ner]` extra (Hebrew named-entity recognition)
+----------------------------------------------------------------------
+
+Enabling the `[ner]` extra pulls:
+  - Hugging Face Transformers (Apache-2.0)
+  - PyTorch (BSD-3-Clause)
+
+and uses the following model, which carries an ATTRIBUTION requirement:
+
+  dicta-il/dictabert-ner — Hebrew Named-Entity Recognition model by DICTA.
+    Authors:  Shaltiel Shmidman, Avi Shmidman, Moshe Koppel (DICTA / Bar-Ilan University)
+    Model:    https://huggingface.co/dicta-il/dictabert-ner
+    Project:  https://dicta.org.il/dicta-bert
+    License:  Creative Commons Attribution 4.0 International (CC BY 4.0)
+              https://creativecommons.org/licenses/by/4.0/
+              "This work is licensed under a Creative Commons Attribution 4.0
+               International License."
+
+    If you enable the [ner] extra you must retain this attribution. The model is
+    used as-is (not modified) and is downloaded at runtime, not redistributed here.
+
+    Citation:
+      @misc{shmidman2023dictabert,
+            title={DictaBERT: A State-of-the-Art BERT Suite for Modern Hebrew},
+            author={Shaltiel Shmidman and Avi Shmidman and Moshe Koppel},
+            year={2023},
+            eprint={2308.16687},
+            archivePrefix={arXiv},
+            primaryClass={cs.CL}
+      }

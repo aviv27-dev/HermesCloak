@@ -1,0 +1,15 @@
+# Example HermesCloak profile. Copy + adapt per deployment; the live profile lives at
+# $HERMES_HOME/cloak/profile.yaml and is NOT part of this repo.
+profile: example
+languages: [he, en]
+fail_mode: open            # open | closed  (default: open, per project decision)
+alerts:
+  channel: telegram
+  on: [unfiltered_sent, leftover_token]
+never_mask:                # entities to never tokenize (avoid over-masking)
+  - "בית המשפט"
+  - "לשכת ההוצאה לפועל"
+token_instruction: true
+# entity_source is wired by the adapter layer:
+#   generic users -> a StaticFileSource("names.txt")
+#   firm deployment -> a custom DB-backed EntitySource (lives in the adapter, not core)

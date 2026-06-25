@@ -1,0 +1,22 @@
+[project]
+name = "hermescloak"
+version = "0.1.0"
+description = "Reversible PII pseudonymization for Hermes LLM agents (contained placeholder lifecycle)."
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dependencies = ["pyyaml>=6.0"]
+
+[project.optional-dependencies]
+# Hebrew NER via DictaBERT (CC BY 4.0 model — see NOTICE). Loaded only by the optional NER service.
+ner = ["transformers>=4.40", "torch>=2.0"]
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["hermescloak*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

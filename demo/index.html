@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HermesCloak — בדיקה / Test harness</title>
+<style>
+  :root {
+    --bg:#0f1216; --panel:#171c22; --line:#2a323c; --ink:#e7edf3; --muted:#8a97a6;
+    --accent:#4ea1ff; --token:#ffcaa8; --tokenbg:#3a2a1d; --ok:#1f7a4d; --bad:#a8323a;
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:"Segoe UI",Arial,sans-serif; line-height:1.5;
+  }
+  header { padding:20px 24px; border-bottom:1px solid var(--line); }
+  h1 { margin:0 0 4px; font-size:20px; }
+  header p { margin:0; color:var(--muted); font-size:13px; }
+  .wrap { display:grid; grid-template-columns:1fr 1fr; gap:16px; padding:20px 24px; }
+  @media (max-width:880px){ .wrap{ grid-template-columns:1fr; } }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px; }
+  .panel h2 { margin:0 0 4px; font-size:15px; }
+  .panel .hint { margin:0 0 12px; color:var(--muted); font-size:12px; }
+  textarea {
+    width:100%; min-height:150px; resize:vertical; background:#0c0f13; color:var(--ink);
+    border:1px solid var(--line); border-radius:8px; padding:10px; font-size:14px;
+    font-family:"Segoe UI",Arial,sans-serif; direction:rtl;
+  }
+  .btnrow { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
+  button {
+    background:var(--accent); color:#04101f; border:0; border-radius:8px;
+    padding:9px 14px; font-size:14px; font-weight:600; cursor:pointer;
+  }
+  button.ghost { background:transparent; color:var(--muted); border:1px solid var(--line); }
+  button:active { transform:translateY(1px); }
+  .out {
+    margin-top:12px; background:#0c0f13; border:1px solid var(--line); border-radius:8px;
+    padding:12px; min-height:60px; white-space:pre-wrap; word-break:break-word; font-size:14px;
+  }
+  .out .label { color:var(--muted); font-size:12px; display:block; margin-bottom:6px; }
+  .tok {
+    background:var(--tokenbg); color:var(--token); border-radius:4px; padding:0 4px;
+    font-weight:700; direction:ltr; display:inline-block;
+  }
+  .banner { margin-top:10px; border-radius:8px; padding:9px 12px; font-size:13px; display:none; }
+  .banner.ok  { background:rgba(31,122,77,.18); border:1px solid var(--ok);  color:#7fe3ad; display:block; }
+  .banner.bad { background:rgba(168,50,58,.18); border:1px solid var(--bad); color:#ff9aa1; display:block; }
+  footer { padding:16px 24px 32px; color:var(--muted); font-size:12px; border-top:1px solid var(--line); }
+  code { background:#0c0f13; border:1px solid var(--line); border-radius:4px; padding:1px 5px; direction:ltr; }
+  /* ③ QA examples browser */
+  .full { padding:0 24px 8px; }
+  .qa-nav { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:10px 0; }
+  .qa-counter { font-variant-numeric:tabular-nums; color:var(--muted); font-size:13px; min-width:64px; text-align:center; direction:ltr; }
+  .chip { background:#0c0f13; border:1px solid var(--line); border-radius:999px; padding:3px 10px; font-size:12px; color:var(--accent); direction:ltr; }
+  .verdict { display:inline-block; border-radius:6px; padding:2px 10px; font-weight:700; font-size:13px; }
+  .verdict.pass { background:rgba(31,122,77,.2); color:#7fe3ad; border:1px solid var(--ok); }
+  .verdict.fail { background:rgba(168,50,58,.2); color:#ff9aa1; border:1px solid var(--bad); }
+  .verdict.info { background:rgba(78,161,255,.15); color:#9cc9ff; border:1px solid var(--accent); }
+  .qa-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  @media (max-width:880px){ .qa-grid{ grid-template-columns:1fr; } }
+  .qa-summary { color:var(--muted); font-size:12px; margin-top:6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>HermesCloak — מעבדת בדיקה</h1>
+  <p>הדגמה חיה של מחזור החיים: PII אמיתי → אסימונים בדרך לענן → שחזור מלא ברגע התשובה. אסימונים לעולם לא נוגעים בדיסק.</p>
+</header>
+
+<div class="wrap">
+  <!-- OUTBOUND -->
+  <section class="panel">
+    <h2>① יציאה (Outbound) — מה הענן רואה</h2>
+    <p class="hint">הקלידו טקסט עם פרטים מזהים. לחיצה על <b>Sanitize</b> מחליפה כל PII באסימון יציב כמו <span class="tok">⟦לקוח_1⟧</span>.</p>
+    <textarea id="src"></textarea>
+    <div class="btnrow">
+      <button onclick="sanitize()">Sanitize ← שלח לענן</button>
+      <button onclick="runRandomTest()">🎲 הרץ בדיקה אקראית</button>
+      <button class="ghost" onclick="resetSession()">איפוס סשן</button>
+    </div>
+    <div class="banner" id="testBanner"></div>
+    <div class="out" id="srcOut"><span class="label">תוצאה (הטקסט שיישלח למודל)</span><span class="muted">— לחצו Sanitize —</span></div>
+  </section>
+
+  <!-- INBOUND -->
+  <section class="panel">
+    <h2>② כניסה (Inbound) — תשובת המודל</h2>
+    <p class="hint">תשובת מודל מדומה המשתמשת באסימונים. לחיצה על <b>Restore</b> משחזרת את הערכים האמיתיים <i>לפני</i> שמירה/הרצה. ראשית הריצו Sanitize.</p>
+    <textarea id="resp"></textarea>
+    <div class="btnrow">
+      <button onclick="restore()">Restore ← המודל ענה</button>
+    </div>
+    <div class="banner" id="banner"></div>
+    <div class="out" id="respOut"><span class="label">תוצאה (לאחר שחזור — ערכים אמיתיים)</span><span class="muted">— לחצו Restore —</span></div>
+  </section>
+</div>
+
+<!-- ③ 100 QA EXAMPLES BROWSER -->
+<div class="full">
+  <section class="panel">
+    <h2>③ 100 הבדיקות — עיון והרצה חיה</h2>
+    <p class="hint">מאגר הבדיקות של HermesCloak. דפדפו בין הדוגמאות (קדימה/אחורה), ראו מה נשלח לענן ומה שוחזר, וההכרעה (עבר/נכשל). כל דוגמה רצה <b>חי</b> מול המנוע האמיתי + שירות ה‑NER. נתונים סינתטיים בלבד.</p>
+    <div class="qa-nav">
+      <button class="ghost" onclick="qaPrev()">‹ הקודם</button>
+      <span class="qa-counter" id="qaCounter">— / —</span>
+      <button class="ghost" onclick="qaNext()">הבא ›</button>
+      <span class="chip" id="qaCat">—</span>
+      <span class="verdict" id="qaVerdict" style="display:none"></span>
+      <button onclick="qaRun()" style="margin-inline-start:auto">▶ הרץ שוב חי</button>
+      <button class="ghost" onclick="qaRunAll()">הרץ הכל</button>
+    </div>
+    <div class="out" id="qaInput"><span class="label">קלט הבדיקה</span><span class="muted">— טוען —</span></div>
+    <div class="qa-grid">
+      <div class="out" id="qaOut"><span class="label">① מה נשלח לענן (מסונן)</span><span class="muted">—</span></div>
+      <div class="out" id="qaRestored"><span class="label">② לאחר שחזור (ערכים אמיתיים)</span><span class="muted">—</span></div>
+    </div>
+    <div class="qa-summary" id="qaSummary"></div>
+  </section>
+</div>
+
+<footer>
+  שרת גשר stdlib בלבד (<code>python -m demo.test_server</code>). מזהה סשן נוכחי: <code id="sid"></code>.
+  &nbsp;זיהוי: דטרמיניסטי (ת"ז/טלפון/מייל/אשראי/תיק) + גזטיר שמות + שירות NER עברי חי (DictaBERT, fail‑open).
+</footer>
+
+<script>
+const SAMPLE_SRC =
+`שלום, אני מטפלת בתיק של דנה כהן.
+ת.ז 123456782, טלפון 052-1234567, מייל dana@example.com.
+מספר התיק הוא ת"א 12345, וכרטיס האשראי לחיוב הוא 4111 1111 1111 1111.`;
+
+const SAMPLE_RESP =
+`אכין מכתב התראה ל⟦לקוח_1⟧ (ת.ז ⟦תז_1⟧).
+אצור קשר בטלפון ⟦טלפון_1⟧ או במייל ⟦מייל_1⟧ בנוגע ל⟦תיק_1⟧.`;
+
+// per-tab session id (varies without Math.random by using performance time + a counter)
+const SESSION = "demo-" + Math.floor(performance.now()).toString(36) + "-" +
+                (window.history.length || 1);
+document.getElementById("sid").textContent = SESSION;
+document.getElementById("src").value = SAMPLE_SRC;
+document.getElementById("resp").value = SAMPLE_RESP;
+
+const TOKEN_RE = /⟦[^_⟧]+_\d+⟧/g;
+function esc(s){ return s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+function highlight(s){ return esc(s).replace(TOKEN_RE, m => `<span class="tok">${m}</span>`); }
+
+async function post(path, body){
+  const r = await fetch(path, {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ ...body, session: SESSION })
+  });
+  if(!r.ok) throw new Error("HTTP " + r.status);
+  return r.json();
+}
+
+async function sanitize(){
+  const text = document.getElementById("src").value;
+  const box = document.getElementById("srcOut");
+  try {
+    const data = await post("/api/sanitize", { messages: [{ role:"user", content:text }] });
+    const sent = (data.messages || []).map(m => m.content).filter(c => typeof c === "string").join("\n\n");
+    const n = Object.values(data.vault || {}).reduce((a,b)=>a+b, 0);
+    box.innerHTML = `<span class="label">תוצאה — ${n} ערכים הוחלפו באסימונים</span>` + highlight(sent);
+  } catch(e){
+    box.innerHTML = `<span class="label">שגיאה</span>${esc(String(e))}`;
+  }
+}
+
+async function restore(){
+  const text = document.getElementById("resp").value;
+  const box = document.getElementById("respOut");
+  const banner = document.getElementById("banner");
+  try {
+    const data = await post("/api/restore", { response: { content: text } });
+    box.innerHTML = `<span class="label">תוצאה — לאחר שחזור (ערכים אמיתיים)</span>` + esc(data.response.content || "");
+    const left = data.leftover || [];
+    if(left.length){
+      banner.className = "banner bad";
+      banner.innerHTML = "⚠️ אסימונים שלא שוחזרו (אות כשל בטוח): " +
+        left.map(t => `<span class="tok">${esc(t)}</span>`).join(" ");
+    } else {
+      banner.className = "banner ok";
+      banner.textContent = data.restored_any
+        ? "✓ כל האסימונים שוחזרו לערכים אמיתיים. אין דליפה."
+        : "המאגר ריק — הריצו Sanitize תחילה כדי לאכלס את ה־Vault.";
+    }
+  } catch(e){
+    box.innerHTML = `<span class="label">שגיאה</span>${esc(String(e))}`;
+  }
+}
+
+// ---- random credibility test (mirrors tests/test_credibility_random.py) ----
+const NAMES = ["דנה כהן","יוסי לוי","רונית אברהם","משה פרץ","שירה מזרחי","אבי ביטון",
+               "נועה פרידמן","איתי שפירא","תמר רוזן","עומר דהן","ליאת גולן","רן הראל"];
+const FILLER = ["הסכם","פגישה","מסמך","בקשה","דיון","החלטה","סעיף","נספח","מועד","משרד",
+                "עניין","צד","הודעה","תשובה","פנייה","עדכון","סיכום","המשך","בנוגע","לאחר",
+                "לפני","כאמור","בהתאם","וכן","אולם","לפיכך","כמו","בנוסף","ועדה","פרוטוקול"];
+const CASE_PREFIXES = ['ת"א','פש"ר','חדל"פ','הוצל"פ','ה"פ','תיק'];
+const ri = n => Math.floor(Math.random()*n);
+const pick = a => a[ri(a.length)];
+
+function validIsraeliId(){
+  const d = Array.from({length:8}, () => ri(10));
+  let t = 0;
+  d.forEach((x,i) => { const v = x * (i%2===0?1:2); t += v>9 ? v-9 : v; });
+  d.push((10 - t%10) % 10);
+  return d.join("");
+}
+function luhnCard(){
+  const base = [4, ...Array.from({length:14}, () => ri(10))];
+  let t = 0, dbl = true;
+  for(let i=base.length-1;i>=0;i--){ let x=base[i]; if(dbl){x*=2; if(x>9)x-=9;} t+=x; dbl=!dbl; }
+  const s = [...base, (10 - t%10) % 10].join("");
+  return Math.random()<0.5 ? `${s.slice(0,4)} ${s.slice(4,8)} ${s.slice(8,12)} ${s.slice(12,16)}` : s;
+}
+function mobilePhone(){
+  const rest = Array.from({length:7}, () => ri(10)).join("");
+  return `05${ri(10)}${pick(["-","",""])}${rest}`;
+}
+function randEmail(){
+  const local = Array.from({length:3+ri(7)}, () => pick("abcdefghijklmnopqrstuvwxyz".split(""))).join("");
+  return `${local}@${pick(["example.com","mail.co.il","firm.org","post.net"])}`;
+}
+function makePii(){
+  switch(pick(["name","id_labeled","id_bare","phone","email","card","case"])){
+    case "name":       { const n=pick(NAMES);        return [n, n]; }
+    case "id_labeled": { const v=validIsraeliId();    return [`ת.ז ${v}`, v]; }
+    case "id_bare":    { const v=validIsraeliId();    return [v, v]; }
+    case "phone":      { const v=mobilePhone();        return [v, v]; }
+    case "email":      { const v=randEmail();          return [v, v]; }
+    case "card":       { const v=luhnCard();           return [v, v]; }
+    default:           { const v=Array.from({length:4+ri(6)}, () => ri(10)).join("");
+                         return [`${pick(CASE_PREFIXES)} ${v}`, v]; }
+  }
+}
+function fill(lo,hi){ return Array.from({length:lo+ri(hi-lo+1)}, () => pick(FILLER)).join(" "); }
+
+function buildDocument(){
+  const nItems = 5 + ri(16);
+  const pool = [], secrets = [], chunks = [fill(3,14)];
+  for(let i=0;i<nItems;i++){
+    let surface, secret;
+    if(pool.length && Math.random()<0.25){ [surface,secret] = pick(pool); }
+    else { [surface,secret] = makePii(); pool.push([surface,secret]); }
+    secrets.push(secret);
+    chunks.push(`${fill(2,10)} ${surface} ${fill(2,10)}`);
+    chunks.push(fill(3,14));
+  }
+  return { text: chunks.filter(Boolean).join(pick([" ","\n",".\n",", "])), secrets };
+}
+
+async function runRandomTest(){
+  const banner = document.getElementById("testBanner");
+  banner.className = "banner"; banner.textContent = "מריץ בדיקה אקראית…"; banner.style.display="block";
+  const session = SESSION + "-r" + Math.floor(performance.now());
+  const { text, secrets } = buildDocument();
+  document.getElementById("src").value = text;
+
+  const checks = [];
+  try {
+    const san = await post("/api/sanitize", { messages:[{role:"user", content:text}], session });
+    const userMsg = (san.messages || []).filter(m => m.role === "user").pop() || {};
+    const body = userMsg.content || "";
+    document.getElementById("srcOut").innerHTML =
+      `<span class="label">פלט מסונן (${secrets.length} ערכים הוזרקו)</span>` + highlight(body);
+
+    const leaked = secrets.filter(s => body.includes(s));
+    checks.push(["NO-LEAK — אף ערך אמיתי לא נותר בפלט", leaked.length === 0,
+                 leaked.length ? `דלפו: ${leaked.length}` : `${secrets.length} ערכים`]);
+
+    const res = await post("/api/restore", { response:{ content: body }, session });
+    document.getElementById("resp").value = body;
+    document.getElementById("respOut").innerHTML =
+      `<span class="label">לאחר שחזור</span>` + esc(res.response.content || "");
+    checks.push(["REVERSIBLE — שחזור מחזיר את המקור במדויק", res.response.content === text, ""]);
+    checks.push(["NO-LEFTOVER — אין אסימונים שלא שוחזרו", (res.leftover||[]).length === 0,
+                 (res.leftover||[]).length ? `${res.leftover.length} נותרו` : ""]);
+
+    const ok = checks.every(c => c[1]);
+    banner.className = "banner " + (ok ? "ok" : "bad");
+    banner.innerHTML = (ok ? "✓ עברה — " : "✗ נכשלה — ") +
+      `${checks.filter(c=>c[1]).length}/${checks.length} בדיקות · אורך מסמך ${text.length} תווים<br>` +
+      checks.map(c => `${c[1]?"✓":"✗"} ${c[0]}${c[2]?" ("+c[2]+")":""}`).join("<br>");
+  } catch(e){
+    banner.className = "banner bad";
+    banner.textContent = "שגיאה בבדיקה: " + String(e);
+  }
+}
+
+async function resetSession(){
+  await post("/api/reset", {});
+  document.getElementById("src").value = SAMPLE_SRC;
+  document.getElementById("resp").value = SAMPLE_RESP;
+  document.getElementById("srcOut").innerHTML = '<span class="label">תוצאה</span><span class="muted">— לחצו Sanitize —</span>';
+  document.getElementById("respOut").innerHTML = '<span class="label">תוצאה</span><span class="muted">— לחצו Restore —</span>';
+  document.getElementById("banner").className = "banner";
+}
+
+// ---- ③ 100 QA examples browser ----
+let QA = [];          // [{id,category,text,mode}]
+let qaIdx = 0;
+const VLABEL = { pass:"✓ עבר", fail:"✗ נכשל", info:"ℹ︎ פער ידוע" };
+
+async function qaLoad(){
+  try {
+    const r = await fetch("/api/examples"); const d = await r.json();
+    QA = d.examples || [];
+    if (QA.length) { qaIdx = 0; qaRender(); qaRun(); }
+  } catch(e){
+    document.getElementById("qaInput").innerHTML = `<span class="label">שגיאה</span>${esc(String(e))}`;
+  }
+}
+function qaRender(){
+  const ex = QA[qaIdx]; if(!ex) return;
+  document.getElementById("qaCounter").textContent = `${qaIdx+1} / ${QA.length}`;
+  document.getElementById("qaCat").textContent = ex.category;
+  document.getElementById("qaInput").innerHTML = `<span class="label">קלט הבדיקה #${ex.id} (${ex.mode})</span>` + esc(ex.text || "—");
+  document.getElementById("qaVerdict").style.display = "none";
+  document.getElementById("qaOut").innerHTML = '<span class="label">① מה נשלח לענן (מסונן)</span><span class="muted">— לחצו "הרץ שוב חי" —</span>';
+  document.getElementById("qaRestored").innerHTML = '<span class="label">② לאחר שחזור</span><span class="muted">—</span>';
+  document.getElementById("qaSummary").textContent = "";
+}
+function qaPrev(){ if(!QA.length) return; qaIdx = (qaIdx - 1 + QA.length) % QA.length; qaRender(); qaRun(); }
+function qaNext(){ if(!QA.length) return; qaIdx = (qaIdx + 1) % QA.length; qaRender(); qaRun(); }
+
+async function qaRun(){
+  const ex = QA[qaIdx]; if(!ex) return;
+  const v = document.getElementById("qaVerdict");
+  v.style.display = "inline-block"; v.className = "verdict info"; v.textContent = "מריץ…";
+  try {
+    const d = await post("/api/run_example", { id: ex.id });
+    v.className = "verdict " + d.verdict;
+    v.textContent = (VLABEL[d.verdict] || d.verdict) + (d.detail ? " — " + d.detail : "");
+    document.getElementById("qaOut").innerHTML = `<span class="label">① מה נשלח לענן (מסונן)</span>` + highlight(d.outbound || "—");
+    document.getElementById("qaRestored").innerHTML = `<span class="label">② לאחר שחזור (ערכים אמיתיים)</span>` + esc(d.restored || "—");
+  } catch(e){
+    v.className = "verdict fail"; v.textContent = "שגיאה: " + String(e);
+  }
+}
+
+async function qaRunAll(){
+  const sum = document.getElementById("qaSummary");
+  let pass=0, fail=0, info=0; const fails=[];
+  sum.textContent = "מריץ את כל הבדיקות…";
+  for (const ex of QA){
+    try {
+      const d = await post("/api/run_example", { id: ex.id });
+      if(d.verdict==="pass") pass++; else if(d.verdict==="fail"){ fail++; fails.push(`#${ex.id} ${ex.category}`); } else info++;
+    } catch(e){ fail++; fails.push(`#${ex.id} (שגיאה)`); }
+  }
+  sum.innerHTML = `<b>סיכום:</b> ${pass} עברו · ${fail} נכשלו · ${info} פער-ידוע · מתוך ${QA.length}` +
+                  (fails.length ? `<br>נכשלו: ${esc(fails.join(", "))}` : "");
+}
+
+qaLoad();
+</script>
+</body>
+</html>
