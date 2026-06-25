@@ -25,11 +25,10 @@ PTH_NAME = "hermescloak_egress.pth"
 # One physical line. site.py exec()s lines beginning with "import". The exec body is
 # guarded by HERMES_HOME and wrapped so a failure can never break interpreter startup.
 PTH_LINE = (
-    '# HermesCloak egress auto-loader: restore leaked tokens in outbound HTTP for agent '
-    'processes only (HERMES_HOME set). Fail-open; delete this file to disable.\n'
-    'import os; exec("if os.environ.get(\'HERMES_HOME\'):\\n try:\\n  '
-    'import hermescloak.integrations.requests_egress as _h; _h.install()\\n'
-    ' except Exception: pass")\n'
+    '# HermesCloak egress auto-loader: restore leaked tokens in outbound HTTP. Activates only in an\n'
+    '# agent context (HERMES_HOME set OR ~/.hermes/cloak exists). Fail-open; delete this file to disable.\n'
+    'import os; exec("try:\\n if os.environ.get(\'HERMES_HOME\') or os.path.isdir(os.path.expanduser(\'~/.hermes/cloak\')):\\n'
+    '  import hermescloak.integrations.requests_egress as _h; _h.install()\\nexcept Exception: pass")\n'
 )
 
 
