@@ -29,6 +29,21 @@ def _restore(s, home):
     return restore_for_send(s, home, where="http")
 
 
+def _audit_restored(home, url):
+    """Positive proof the egress net fired on a real send (host only, no PII)."""
+    try:
+        import json as _j
+        import time as _t
+        from urllib.parse import urlparse
+        from hermescloak.egress import _home
+        log = os.path.join(_home(home), "cloak", "audit.log")
+        with open(log, "a", encoding="utf-8") as f:
+            f.write(_j.dumps({"kind": "egress_http_restored", "ts": _t.strftime("%F %T"),
+                              "host": urlparse(url).netloc}, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
 def _restore_body(kwargs, home):
     """Restore ⟦tokens⟧ inside json=/data= bodies. Returns True if anything changed."""
     changed = False
@@ -72,7 +87,8 @@ def install(hermes_home: str | None = None) -> bool:
     def request(self, method, url, **kwargs):
         try:
             if (("json" in kwargs and kwargs["json"] is not None) or kwargs.get("data") is not None):
-                _restore_body(kwargs, home)
+                if _restore_body(kwargs, home):
+                    _audit_restored(home, url)   # positive proof the net fired (no PII; host only)
         except Exception:
             pass                       # fail-open: never block a request
         return _orig(self, method, url, **kwargs)

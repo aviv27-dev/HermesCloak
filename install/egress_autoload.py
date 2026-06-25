@@ -22,14 +22,26 @@ import subprocess
 import sys
 
 PTH_NAME = "hermescloak_egress.pth"
-# One physical line. site.py exec()s lines beginning with "import". The exec body is
-# guarded by HERMES_HOME and wrapped so a failure can never break interpreter startup.
-PTH_LINE = (
-    '# HermesCloak egress auto-loader: restore leaked tokens in outbound HTTP. Activates only in an\n'
-    '# agent context (HERMES_HOME set OR ~/.hermes/cloak exists). Fail-open; delete this file to disable.\n'
-    'import os; exec("try:\\n if os.environ.get(\'HERMES_HOME\') or os.path.isdir(os.path.expanduser(\'~/.hermes/cloak\')):\\n'
-    '  import hermescloak.integrations.requests_egress as _h; _h.install()\\nexcept Exception: pass")\n'
-)
+
+
+def _resolve_home() -> str:
+    return os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+
+
+def _pth_content(home: str) -> str:
+    """Build the .pth with the agent's HERMES_HOME baked in (cross-OS: the ~/.hermes
+    fallback is wrong on Windows, so we hardcode the path resolved at install time).
+    One physical 'import' line; site.py exec()s it; fully wrapped so it can't break startup."""
+    cloak = os.path.join(home, "cloak")
+    return (
+        "# HermesCloak egress auto-loader: restore leaked tokens in outbound HTTP. Activates in an\n"
+        "# agent context (HERMES_HOME set OR the baked cloak dir exists). Fail-open; delete to disable.\n"
+        "import os; exec(\"try:\\n"
+        " _hm = os.environ.get('HERMES_HOME') or {home!r}\\n"
+        " if os.environ.get('HERMES_HOME') or os.path.isdir({cloak!r}):\\n"
+        "  import hermescloak.integrations.requests_egress as _h; _h.install(_hm)\\n"
+        "except Exception: pass\")\n"
+    ).format(home=home, cloak=cloak)
 
 
 def _target_dir() -> str:
@@ -45,9 +57,10 @@ def _path() -> str:
 
 def apply() -> int:
     p = _path()
+    home = _resolve_home()
     with open(p, "w", encoding="utf-8") as f:
-        f.write(PTH_LINE)
-    print(f"[egress] wrote {p}")
+        f.write(_pth_content(home))
+    print(f"[egress] wrote {p} (HERMES_HOME baked: {home})")
     return verify()
 
 
