@@ -44,6 +44,32 @@ def _audit_restored(home, url):
         pass
 
 
+def _restore_blob(d, home):
+    """Restore a str/bytes body. Handles a LITERAL token, and a base64-of-text body
+    (e.g. Graph MIME sendMail base64-encodes the whole calendar/email MIME, hiding the
+    ⟦token⟧ from a plain scan). Returns (new_value_or_original, changed)."""
+    raw = d if isinstance(d, str) else None
+    if raw is None:
+        try: raw = d.decode("utf-8")
+        except Exception: raw = None
+    # 1) literal token in the (text) body
+    if raw is not None and "⟦" in raw:
+        out = _restore(raw, home)
+        return (out if isinstance(d, str) else out.encode("utf-8")), True
+    # 2) base64-encoded TEXT body — decode, restore, re-encode (binary base64 fails the
+    #    utf-8 decode and is skipped, so real binary attachments are left untouched/safe)
+    try:
+        import base64
+        decoded = base64.b64decode(d, validate=True)
+        text = decoded.decode("utf-8")
+        if "⟦" in text:
+            reenc = base64.b64encode(_restore(text, home).encode("utf-8"))
+            return (reenc if isinstance(d, bytes) else reenc.decode("ascii")), True
+    except Exception:
+        pass
+    return d, False
+
+
 def _restore_body(kwargs, home):
     """Restore ⟦tokens⟧ inside json=/data= bodies. Returns True if anything changed."""
     changed = False
@@ -54,17 +80,10 @@ def _restore_body(kwargs, home):
             kwargs["json"] = _json.loads(_restore(dumped, home))
             changed = True
     d = kwargs.get("data")
-    if isinstance(d, str) and "⟦" in d:
-        kwargs["data"] = _restore(d, home)
-        changed = True
-    elif isinstance(d, bytes):
-        try:
-            text = d.decode("utf-8")
-            if "⟦" in text:
-                kwargs["data"] = _restore(text, home).encode("utf-8")
-                changed = True
-        except Exception:
-            pass
+    if isinstance(d, (str, bytes)):
+        new, ch = _restore_blob(d, home)
+        if ch:
+            kwargs["data"] = new; changed = True
     elif isinstance(d, dict):
         for k, v in list(d.items()):
             if isinstance(v, str) and "⟦" in v:
