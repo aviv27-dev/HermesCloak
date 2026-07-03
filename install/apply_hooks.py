@@ -17,7 +17,14 @@ Each seam is guarded by `try/except: pass`, so even a wrong/edited insertion can
 raise into the agent. `--verify` is the authoritative check (substring of a stable
 sentinel). `--apply` is best-effort anchor insertion; if an anchor is not found (e.g. a
 future hermes refactor moved it), it prints the block + location for a 30-second manual paste.
-The streaming seam (C) wraps an existing callback, so it is verify+manual-print only.
+The streaming seam (C) is wrap-style (it replaces the stream_delta_callback assignment); it
+auto-applies by anchoring on that line, and only falls back to manual-print if a refactor
+renames the anchor.
+
+Automate it so an update never silently drops the privacy layer (see docs/UPGRADING.md):
+  * systemd: add `ExecStartPre=-python install/apply_hooks.py --apply --hermes-root <ROOT>` to the
+    gateway unit — re-applies on every start (a restart always follows an update). Non-fatal.
+  * git: a `post-merge` hook in the hermes-agent checkout that runs `--apply --verify`.
 """
 import argparse
 import os
@@ -43,8 +50,12 @@ B_BLOCK = '''            try:  # HermesCloak: restore real values (content + too
             except Exception:
                 pass'''
 
-# Seam C — STREAMING last-mile restore. Wraps stream_delta_callback; manual paste only.
+# Seam C — STREAMING last-mile restore. WRAP-style: replaces the stream_delta_callback
+# assignment with a version that filters ⟦tokens⟧ out of streamed deltas. Auto: anchors on the
+# assignment line and wraps it (idempotent). Falls back to manual-print if a future hermes
+# refactor renames the anchor (verify stays authoritative).
 C_FILE = "gateway/run.py"
+C_ANCHOR = "            agent.stream_delta_callback = _stream_delta_cb"
 C_BLOCK = '''            # HermesCloak: restore ⟦tokens⟧ in streamed deltas before they reach the gateway
             # consumer, so the user-facing reply shows real values (enforce-only, fail-open).
             if _stream_delta_cb is not None:
@@ -57,15 +68,17 @@ C_BLOCK = '''            # HermesCloak: restore ⟦tokens⟧ in streamed deltas 
                             __cb(_out)
                     agent.stream_delta_callback = _cloak_stream_delta_cb
                 except Exception:
-                    agent.stream_delta_callback = _stream_delta_cb'''
+                    agent.stream_delta_callback = _stream_delta_cb
+            else:
+                agent.stream_delta_callback = _stream_delta_cb'''
 
 SEAMS = [
     {"name": "A outbound (chat_completion_helpers)", "file": A_FILE, "anchor": A_ANCHOR,
      "block": A_BLOCK, "auto": True, "after": True},
     {"name": "B inbound  (conversation_loop)", "file": B_FILE, "anchor": B_ANCHOR,
      "block": B_BLOCK, "auto": True, "after": True},
-    {"name": "C stream   (gateway/run)", "file": C_FILE, "anchor": None,
-     "block": C_BLOCK, "auto": False, "after": True},
+    {"name": "C stream   (gateway/run)", "file": C_FILE, "anchor": C_ANCHOR,
+     "block": C_BLOCK, "auto": True, "wrap": True},
 ]
 
 
@@ -115,8 +128,11 @@ def apply(root, dry):
             print(f"     → paste this block into {s['file']}:\n")
             print("\n".join("       " + ln for ln in s["block"].splitlines()) + "\n")
             continue
-        idx = src.index(s["anchor"]) + len(s["anchor"])
-        new = src[:idx] + "\n" + s["block"] + src[idx:]
+        if s.get("wrap"):
+            new = src.replace(s["anchor"], s["block"], 1)   # replace the assignment with the wrapped version
+        else:
+            idx = src.index(s["anchor"]) + len(s["anchor"])
+            new = src[:idx] + "\n" + s["block"] + src[idx:]
         if dry:
             print(f"  [dry-run] would insert seam {s['name']} after anchor in {s['file']}")
         else:

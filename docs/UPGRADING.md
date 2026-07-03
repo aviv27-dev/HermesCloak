@@ -45,6 +45,30 @@ hermes-agent-update.sh && \
   echo "‼ HermesCloak seams missing after update — privacy layer is OFF until fixed"
 ```
 
+**Best for a systemd-managed gateway (fully automatic, no reminders).** Add an `ExecStartPre` to the
+gateway unit so the seams are re-applied *before every start* — and since a gateway restart always
+follows an update, this restores the privacy layer with nobody having to remember:
+
+```ini
+# /etc/systemd/system/<gateway>.service.d/42-cloak-reapply.conf
+[Service]
+ExecStartPre=-/usr/bin/python3 /path/to/HermesCloak/install/apply_hooks.py --apply --hermes-root /path/to/hermes-agent
+```
+
+Then `systemctl daemon-reload`. The leading `-` makes it non-fatal (the gateway still starts if it
+errors — fail-open, consistent with the seams). `--apply` is idempotent, so it's a no-op when the
+seams are already present, and it re-applies all three (including the wrap-style streaming seam).
+
+**For a plain git checkout.** A `post-merge` hook re-applies right after the update pulls:
+
+```sh
+# hermes-agent/.git/hooks/post-merge   (chmod +x)
+#!/bin/sh
+ROOT="$(git rev-parse --show-toplevel)"
+python /path/to/HermesCloak/install/apply_hooks.py --apply  --hermes-root "$ROOT"
+python /path/to/HermesCloak/install/apply_hooks.py --verify --hermes-root "$ROOT"
+```
+
 A periodic `--verify` (cron) that alerts on a non-zero exit is a cheap safety net between updates.
 
 ## If you can't re-apply right now
