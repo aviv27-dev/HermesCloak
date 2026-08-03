@@ -1,12 +1,22 @@
 #!/usr/bin/env python3
-"""Install/verify/remove the egress auto-loader (.pth).
+"""Install/verify/remove the HermesCloak auto-loader (.pth).
 
-The egress HTTP patch must run in EVERY python process an agent spawns — including
-the ad-hoc scripts a model writes to send mail / call external APIs. There is no
-single mailer to wrap, so we drop a `.pth` into site-packages: Python executes its
-`import` line at interpreter startup, which installs the requests patch
-(restore ⟦tokens⟧ in outbound HTTP bodies) — but ONLY when HERMES_HOME is set, so
-non-agent python on the same box is untouched. Fail-open; remove the file to disable.
+Two patches must run in EVERY python process an agent spawns:
+
+  * ``requests_egress`` — restore ⟦tokens⟧ in outbound HTTP bodies, including the
+    ad-hoc scripts a model writes to send mail / call external APIs. There is no
+    single mailer to wrap.
+  * ``httpx_llm`` — mask LLM traffic at the transport layer. hermes reaches cloud
+    models from ~120 auxiliary call sites that no source seam covers; patching httpx
+    (used by the OpenAI SDK, the Anthropic SDK and the native Gemini adapter) covers
+    all of them at once, including sites added by future hermes versions.
+
+So we drop a `.pth` into site-packages: Python executes its `import` line at
+interpreter startup — but ONLY when HERMES_HOME is set, so non-agent python on the
+same box is untouched. Fail-open; remove the file to disable.
+
+Note: this imports httpx at interpreter startup in an agent context, which costs a
+few tens of ms per process. That is the price of catching the SDKs before first use.
 
 Usage:
   python -m install.egress_autoload --apply     # write the .pth into the current interpreter's site-packages
@@ -40,6 +50,7 @@ def _pth_content(home: str) -> str:
         " _hm = os.environ.get('HERMES_HOME') or {home!r}\\n"
         " if os.environ.get('HERMES_HOME') or os.path.isdir({cloak!r}):\\n"
         "  import hermescloak.integrations.requests_egress as _h; _h.install(_hm)\\n"
+        "  import hermescloak.integrations.httpx_llm as _x; _x.install(_hm)\\n"
         "except Exception: pass\")\n"
     ).format(home=home, cloak=cloak)
 
@@ -79,15 +90,28 @@ def verify() -> int:
     if not os.path.exists(p):
         print(f"[egress] NOT installed ({p} missing)")
         return 1
-    # prove it actually patches in a fresh interpreter with HERMES_HOME set
+    # prove it actually patches in a fresh interpreter with HERMES_HOME set.
+    # cwd is neutralised: `python -c` puts the current directory on sys.path, so probing
+    # from a hermescloak checkout would import the source tree and report a green that a
+    # real agent process (different cwd) would never see.
+    import tempfile
     env = dict(os.environ, HERMES_HOME=os.environ.get("HERMES_HOME", "/tmp/_hce_probe"))
-    code = ("import requests,sys;"
-            "sys.exit(0 if getattr(requests.sessions.Session.request,'__hermescloak_egress__',False) else 3)")
-    r = subprocess.run([sys.executable, "-c", code], env=env)
+    code = ("import sys;"
+            "import requests;"
+            "eg = getattr(requests.sessions.Session.request,'__hermescloak_egress__',False);"
+            "import httpx;"
+            "lm = getattr(httpx.Client.send,'__hermescloak_llm__',False);"
+            "print('egress=%s llm=%s' % (bool(eg), bool(lm)));"
+            "sys.exit(0 if (eg and lm) else 3)")
+    r = subprocess.run([sys.executable, "-c", code], env=env, cwd=tempfile.gettempdir(),
+                       capture_output=True)
+    out = r.stdout.decode("utf-8", "replace").strip()
     if r.returncode == 0:
-        print(f"[egress] OK — installed and patching ({p})")
+        print(f"[egress] OK — installed and patching ({p})  [{out}]")
         return 0
-    print(f"[egress] FILE present but patch did NOT load — check that hermescloak imports in this interpreter")
+    print("[egress] FILE present but the patches did NOT fully load "
+          f"[{out or r.stderr.decode('utf-8', 'replace').strip()}]")
+    print("         → check that hermescloak (and httpx) import in this interpreter")
     return 3
 
 

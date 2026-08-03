@@ -45,12 +45,52 @@ class Engine:
         self._content_cache[content] = out
         return out
 
+    def mask_text(self, text: str) -> str:
+        """Mask one string with this engine's vault (public entry for the transport hook)."""
+        if not isinstance(text, str) or not text:
+            return text
+        return self._tokenize_cached(text)
+
+    def _tokenize_block(self, block):
+        """One block of a multimodal content list.
+
+        Text lives under "text" (OpenAI/Anthropic text parts, Gemini parts) or, for
+        nested shapes like Anthropic tool_result, under "content". Image payloads and
+        every other key are left untouched — pixels can't be masked, and rewriting
+        unrelated keys risks corrupting the request.
+        """
+        if isinstance(block, str):
+            return self._tokenize_cached(block)
+        if not isinstance(block, dict):
+            return block
+        out = dict(block)
+        if isinstance(out.get("text"), str):
+            out["text"] = self._tokenize_cached(out["text"])
+        inner = out.get("content")
+        if isinstance(inner, str):
+            out["content"] = self._tokenize_cached(inner)
+        elif isinstance(inner, list):
+            out["content"] = [self._tokenize_block(b) for b in inner]
+        return out
+
+    def _tokenize_content(self, content):
+        """Mask message content of ANY shape.
+
+        hermes uses a plain str for ordinary turns but a LIST OF BLOCKS on
+        image/attachment turns (agent/turn_context.py, agent/image_routing.py).
+        Masking only str silently passed every multimodal turn through in cleartext.
+        """
+        if isinstance(content, str):
+            return self._tokenize_cached(content)
+        if isinstance(content, list):
+            return [self._tokenize_block(b) for b in content]
+        return content
+
     def sanitize_outbound(self, messages: list[dict]) -> list[dict]:
         out = copy.deepcopy(messages)              # never mutate the canonical conversation
         for msg in out:
-            content = msg.get("content")
-            if isinstance(content, str):
-                msg["content"] = self._tokenize_cached(content)
+            if "content" in msg:
+                msg["content"] = self._tokenize_content(msg["content"])
         if self.profile.token_instruction and not self.vault.is_empty():
             # merge into an existing system message if present (hermes already has one),
             # else insert a fresh leading system message

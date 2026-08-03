@@ -32,11 +32,28 @@ def _cloak_dir() -> Path:
     return Path(_home()) / "cloak"
 
 
+_MODE_TTL = 5.0                 # seconds; a MODE flip takes effect within this window
+_mode_cache: dict[str, tuple[float, str]] = {}
+
+
 def _mode() -> str:
+    """MODE for the current HERMES_HOME, cached briefly.
+
+    This is called on EVERY outbound request, every restore, and every streaming
+    delta — an uncached read meant one filesystem syscall per streamed token.
+    """
+    import time
+    home = _home()
+    hit = _mode_cache.get(home)
+    now = time.monotonic()
+    if hit is not None and (now - hit[0]) < _MODE_TTL:
+        return hit[1]
     try:
-        return (_cloak_dir() / "MODE").read_text(encoding="utf-8").strip().lower()
+        val = (_cloak_dir() / "MODE").read_text(encoding="utf-8").strip().lower()
     except Exception:
-        return "off"
+        val = "off"
+    _mode_cache[home] = (now, val)
+    return val
 
 
 def _audit(kind: str, detail: str) -> None:
@@ -44,6 +61,24 @@ def _audit(kind: str, detail: str) -> None:
         FileAuditAlerter(str(_cloak_dir() / "audit.log")).send(AlertEvent(kind, _home(), detail))
     except Exception:
         pass
+
+
+def fail_closed() -> bool:
+    """Does this deployment want a masking failure to BLOCK the send?
+
+    `fail_mode` was parsed into Profile from day one but read by nothing, so
+    `fail_mode: closed` silently behaved as open — the operator believed they had a
+    blocking guarantee they did not have. Reading it here makes the setting real.
+    Defaults to open: a broken cloak must not take a working agent down unless the
+    deployment explicitly asked for that trade.
+    """
+    try:
+        prof_path = _cloak_dir() / "profile.yaml"
+        if not prof_path.exists():
+            return False
+        return Profile.from_yaml(str(prof_path)).fail_mode.strip().lower() == "closed"
+    except Exception:
+        return False
 
 
 def _build_engine(session_id: str = "default") -> Engine:
@@ -105,6 +140,28 @@ def _engine_for(agent) -> Engine:
         return eng
 
 
+_TRANSPORT_ENGINES: dict[str, Engine] = {}
+
+
+def transport_engine():
+    """Engine for this process's HERMES_HOME, for callers with no `agent` object.
+
+    The transport hook fires far below the agent loop (inside httpx), where no agent
+    is in scope. It shares the same per-agent durable vault as the seams, so a token
+    minted by a seam restores at transport and vice versa.
+    Returns None unless MODE is enforce.
+    """
+    if _mode() != "enforce":
+        return None
+    home = _home()
+    with _LOCK:
+        eng = _TRANSPORT_ENGINES.get(home)
+        if eng is None:
+            eng = _build_engine("transport")
+            _TRANSPORT_ENGINES[home] = eng
+        return eng
+
+
 def cloak_sanitize_outbound(agent, api_messages):
     mode = _mode()
     if mode not in ("shadow", "enforce"):
@@ -115,14 +172,21 @@ def cloak_sanitize_outbound(agent, api_messages):
         if mode == "shadow":
             _audit("shadow_detect", json.dumps(eng.vault.summary(), ensure_ascii=False))
             return api_messages  # zero behaviour change — original goes to the cloud
-        # enforce: prove no detected real value reached the cloud-bound copy
-        blob = " ".join(m.get("content", "") for m in sanitized if isinstance(m.get("content"), str))
+        # enforce: prove no detected real value reached the cloud-bound copy.
+        # Serialize the WHOLE payload: the old version joined only str content, so it
+        # could not see leaks in multimodal (list) content — it reported a clean 0 for
+        # exactly the payloads that leaked most. The proof must cover every shape.
+        blob = json.dumps(sanitized, ensure_ascii=False)
         _audit("enforce_send", json.dumps(
             {"entities": eng.vault.summary(), "real_values_in_outbound": eng.vault.count_present(blob)},
             ensure_ascii=False))
         return sanitized
-    except Exception as exc:  # noqa: BLE001 — fail-open
+    except Exception as exc:  # noqa: BLE001 — fail-open unless the profile says otherwise
         _audit("unfiltered_sent", repr(exc))
+        if fail_closed():
+            from hermescloak.errors import CloakFailClosed
+            _audit("fail_closed_block", repr(exc))
+            raise CloakFailClosed(f"masking failed, send blocked: {exc!r}") from exc
         return api_messages
 
 

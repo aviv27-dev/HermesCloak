@@ -1,9 +1,18 @@
 # Surviving hermes-agent version updates
 
 HermesCloak wires into hermes-agent by inserting three small seams into the agent source
-(see [INTEGRATION.md](INTEGRATION.md)). **A hermes-agent update rewrites those files**, which
-silently removes the seams — the agent keeps running, but tokenization stops and PII flows to the
-cloud again, with no error. So treat re-applying the seams as a required post-update step.
+(see [INTEGRATION.md](INTEGRATION.md)). An update can silently disarm the privacy layer in **two**
+distinct ways, and they need different fixes:
+
+1. **The update rewrites the seam files**, removing the seams. Fix: re-apply.
+2. **The update rebuilds the agent's venv**, removing the installed `hermescloak` package while
+   leaving the seam source text untouched. The seams are `try/except: pass`, so they degrade to
+   silent no-ops: masking is completely off while a seams-only check reports a healthy green.
+   Fix: reinstall the package into that venv.
+
+Failure mode 2 is the nastier one — every visible indicator says healthy. It is why `--verify` now
+also proves the package is importable *by the interpreter that runs the agent*, and exits non-zero
+when it is not.
 
 ## The risk in one line
 
@@ -12,17 +21,22 @@ After `hermes-agent` updates, the privacy layer can be **silently gone**. Always
 ## Procedure for every hermes-agent update
 
 ```bash
-# 1. update hermes-agent as usual (the seams are now likely gone)
+# 1. update hermes-agent as usual (the seams and/or the venv install are now likely gone)
 
-# 2. re-verify — authoritative present/missing check
+# 2. re-verify — checks seams AND that the agent's interpreter can import hermescloak
 python install/apply_hooks.py --verify --hermes-root $HERMES_HOME/hermes-agent
 
-# 3. if anything is MISSING, re-apply (idempotent — skips seams already present)
+# 3a. if a seam is MISSING, re-apply (idempotent — skips seams already present)
 python install/apply_hooks.py --apply --hermes-root $HERMES_HOME/hermes-agent
 #    if an anchor moved in the new version, --apply prints the exact block to paste manually
 #    (and `--print` shows all three blocks + their target locations)
 
-# 4. re-verify until all three show OK
+# 3b. if it reports BROKEN (not importable), reinstall into the agent's venv:
+$HERMES_HOME/hermes-agent/venv/bin/python -m pip install -e /path/to/HermesCloak
+#    then re-run the .pth auto-loader so the transport hook loads at startup:
+$HERMES_HOME/hermes-agent/venv/bin/python -m install.egress_autoload --apply
+
+# 4. re-verify until seams show OK *and* the runtime check passes
 python install/apply_hooks.py --verify --hermes-root $HERMES_HOME/hermes-agent
 
 # 5. restart the gateway so the agent process loads the patched files
@@ -32,6 +46,9 @@ python install/apply_hooks.py --verify --hermes-root $HERMES_HOME/hermes-agent
 tail $HERMES_HOME/cloak/audit.log
 #    look for fresh enforce_send with "real_values_in_outbound": 0
 ```
+
+**A stale `audit.log` mtime while gateways are serving is proof the cloak is off**, whatever
+`--verify` says. It is the one signal that cannot be faked by the seams being textually present.
 
 ## Make it automatic (recommended)
 

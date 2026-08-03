@@ -78,9 +78,31 @@ or spaCy; recognizers are built in. The optional Hebrew NER pulls `transformers`
 
 ## Use it with hermes-agent
 
-HermesCloak wires into a hermes-agent checkout via three small, fail-open seams (it has no plugin
-API). Everything that identifies a deployment (profile, name gazetteer, MODE) lives under
-`$HERMES_HOME/cloak/` — never in this repo.
+HermesCloak wires into a hermes-agent checkout two ways. Everything that identifies a deployment
+(profile, name gazetteer, MODE) lives under `$HERMES_HOME/cloak/` — never in this repo.
+
+**1. Transport chokepoint (primary).** A patch on `httpx` — the library the OpenAI SDK, the
+Anthropic SDK and the native Gemini adapter all use — masks conversation content on the way out and
+rehydrates non-streaming JSON replies on the way back. This matters because the main chat completion
+is *not* the only thing that talks to a cloud model: hermes reaches models from ~120 auxiliary call
+sites (title generation, context compression, vision, web-extract, approval, MCP…), and
+`trajectory_compressor` calls the client directly. None of those pass a source seam, so without this
+your conversation history goes to the compression model and every session's first exchange goes to
+the title model in cleartext. Because it sits at the transport, **call sites added by future hermes
+versions are covered without a new seam.**
+
+Masking is deliberately *targeted* — only message-bearing subtrees (`messages`, `system`, `contents`,
+`systemInstruction`, `input`) are rewritten, so tool schemas and sampling params stay byte-identical.
+Restoring is *blanket* — any ⟦token⟧ in a reply is internal state that must become real again before
+it is persisted.
+
+**2. Three source seams (still needed).** The transport layer deliberately does not touch streaming
+responses, so the main chat path's inbound restore stays with seams B and C. Seam A remains the
+earliest masking point and the one that adds the token instruction.
+
+Known gaps: providers that do not use httpx (Bedrock via boto3, the `requests`-based image/video
+generation providers) and anything a model runs in a subprocess are **not** covered by the transport
+hook.
 
 - **[docs/INTEGRATION.md](docs/INTEGRATION.md)** — install the package, configure
   `$HERMES_HOME/cloak/`, install the three seams (`install/apply_hooks.py`), verify via the audit log.

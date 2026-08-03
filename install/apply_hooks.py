@@ -38,7 +38,13 @@ A_ANCHOR = '    """Build the keyword arguments dict for the active API mode."""'
 A_BLOCK = '''    try:  # HermesCloak: tokenize a COPY of outbound messages before the cloud (MODE-scoped, fail-open)
         from hermescloak.adapter.hermes_live import cloak_sanitize_outbound
         api_messages = cloak_sanitize_outbound(agent, api_messages)
-    except Exception:
+    except Exception as _cloak_exc:
+        # fail-open by default, but a profile with fail_mode: closed asks for the send to
+        # be BLOCKED on a masking failure — swallowing that here would forward the
+        # unmasked messages and silently defeat the setting. Name-checked so this line
+        # needs no import on the failure path.
+        if type(_cloak_exc).__name__ == "CloakFailClosed":
+            raise
         pass'''
 
 # Seam B — INBOUND restore. Insert after the transport-agnostic assistant-message convergence.
@@ -95,18 +101,75 @@ def _read(path):
         return f.read()
 
 
-def verify(root):
+def _venv_python(root, override=None):
+    """The interpreter that actually RUNS the agent (not the one running this script)."""
+    if override:
+        return override
+    for rel in ("venv/bin/python", "venv/bin/python3", ".venv/bin/python",
+                "venv/Scripts/python.exe"):
+        p = os.path.join(root, rel)
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def verify_importable(root, venv_python=None):
+    """Can the agent's interpreter import hermescloak?
+
+    THIS is the check that matters. The seams are `try/except: pass`, so when the
+    package is missing from the agent's venv they degrade to silent no-ops: masking
+    is completely off while a seams-only check still reports a healthy green. A
+    hermes-agent upgrade rebuilds that venv and wipes the install, leaving the seam
+    source text behind — exactly the state that produces a false green.
+    """
+    py = _venv_python(root, venv_python)
+    if py is None:
+        print("  [WARN   ] no venv found under the hermes root — cannot prove importability")
+        print("            pass --venv-python <path> to check the real interpreter")
+        return None                      # unknown, not proven-bad
+    import subprocess
+    import tempfile
+    try:
+        # cwd MUST be neutral: `python -c` puts the current directory on sys.path, so
+        # running this from a hermescloak checkout would import the local source tree and
+        # report a green that the real gateway (different cwd) would never see.
+        r = subprocess.run([py, "-c", "import hermescloak; print(hermescloak.__file__)"],
+                           capture_output=True, timeout=30, cwd=tempfile.gettempdir())
+    except Exception as exc:             # noqa: BLE001 — report, never raise
+        print(f"  [WARN   ] could not run {py}: {exc!r}")
+        return None
+    if r.returncode == 0:
+        origin = r.stdout.decode("utf-8", "replace").strip()
+        print(f"  [OK     ] hermescloak importable by {py}")
+        print(f"            resolved from: {origin}")
+        return True
+    print(f"  [BROKEN ] hermescloak NOT importable by {py}")
+    print("            → the seams are present but INERT: masking is OFF.")
+    print(f"            → fix: {py} -m pip install -e <hermescloak checkout>")
+    return False
+
+
+def verify(root, venv_python=None):
     print(f"hermes-agent root: {root}\n--- HermesCloak seam verification ---")
     ok = True
     for s in SEAMS:
         p = os.path.join(root, s["file"])
-        present = os.path.exists(p) and SENTINEL in _read(p) and s["block"].split("\n")[0].strip()[:30] in _read(p)
-        # robust check: sentinel + the seam-specific import symbol
-        sym = "cloak_sanitize_outbound" if "A " in s["name"] else "cloak_restore_inbound" if "B " in s["name"] else "cloak_filter_stream_delta"
+        # the seam-specific import symbol is the stable marker
+        sym = ("cloak_sanitize_outbound" if "A " in s["name"]
+               else "cloak_restore_inbound" if "B " in s["name"]
+               else "cloak_filter_stream_delta")
         present = os.path.exists(p) and sym in _read(p)
-        print(f"  [{'OK ' if present else 'MISSING'}] {s['name']}  ({s['file']})")
+        print(f"  [{'OK     ' if present else 'MISSING'}] {s['name']}  ({s['file']})")
         ok = ok and present
-    print("--- " + ("all seams present ✓" if ok else "SOME SEAMS MISSING — run --apply or --print") + " ---")
+    print("--- runtime check (seams are inert without this) ---")
+    importable = verify_importable(root, venv_python)
+    if importable is False:
+        ok = False
+    if ok and importable is None:
+        print("--- seams present, but the cloak could NOT be proven live ⚠ ---")
+        return False
+    print("--- " + ("all seams present AND live ✓" if ok
+                    else "NOT PROTECTED — see above") + " ---")
     return ok
 
 
@@ -147,6 +210,8 @@ def apply(root, dry):
 def main():
     ap = argparse.ArgumentParser(description="Install/verify HermesCloak seams in hermes-agent")
     ap.add_argument("--hermes-root", default=None)
+    ap.add_argument("--venv-python", default=None,
+                    help="interpreter that runs the agent (default: <root>/venv/bin/python)")
     ap.add_argument("--verify", action="store_true")
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--print", dest="show", action="store_true", help="print all seam blocks")
@@ -166,7 +231,7 @@ def main():
         apply(root, a.dry_run)
         return 0
     # default = verify
-    return 0 if verify(root) else 1
+    return 0 if verify(root, a.venv_python) else 1
 
 
 if __name__ == "__main__":
