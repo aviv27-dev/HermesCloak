@@ -1,37 +1,39 @@
-"""Transport-layer masking for LLM traffic — the provider-agnostic chokepoint.
+"""Transport-layer hook on httpx — one patch, two jobs, one direction each.
 
-The three source seams cover ONE call path (``build_api_kwargs``). hermes-agent also
-reaches cloud models through ~120 auxiliary call sites (``agent/auxiliary_client.py``
-→ title generation, context compression, vision, web-extract, approval, MCP…), plus
-``trajectory_compressor`` calling ``chat.completions.create()`` directly. None of those
-pass a seam, so on a stock install a conversation's history goes to the compression
-model and every session's first exchange goes to the title model — in cleartext.
+httpx is where hermes traffic converges: the OpenAI SDK, the Anthropic SDK and the
+native Gemini adapter all sit on it, and so do many model-written scripts. Patching
+``Client.send`` / ``AsyncClient.send`` therefore covers call sites that no source
+seam ever saw — and call sites that future hermes versions add.
 
-Seaming each call site is a losing race: every hermes release adds more. Instead this
-patches the one place they all converge — ``httpx``, which the OpenAI SDK, the
-Anthropic SDK and the native Gemini adapter all use. A new call site added by a future
-hermes version is covered the moment it sends a request, with no new seam.
+Outbound, per request body:
 
-Direction of travel:
-  * OUTBOUND — mask, but TARGETED. Only message-bearing subtrees (``messages``,
-    ``system``, ``contents``, ``systemInstruction``, ``input``) are rewritten. Tool
-    schemas, model names and sampling params are left byte-identical, because masking
-    a tool's description or an enum value would silently break tool-calling.
-  * INBOUND — restore, and BLANKET. Every string in a non-streaming JSON response is
-    rehydrated. Unlike masking this needs no shape knowledge: a ⟦token⟧ appearing
-    anywhere in a reply is by definition internal state that must become real again
-    before it is persisted. Without this, a masked title request would persist
-    "meeting with ⟦לקוח_1⟧" as the session title — a token on disk, which is exactly
-    what the design forbids.
+  * **Chat payload → MASK.** The main loop is already masked by the cloak context
+    engine (``select_context``), on which masking is idempotent — but hermes also
+    reaches models from ~120 auxiliary call sites (title generation, context
+    compression, vision, web-extract, approval, MCP…) that bypass the agent loop
+    entirely. This hook is what masks those. Targeted rewrite: only message-bearing
+    subtrees; tool schemas and params stay byte-identical.
 
-Streaming responses are left alone: the main chat path streams and is already restored
-by seams B and C, and buffering an SSE body here would break incremental delivery. The
-auxiliary calls that motivate this module are non-streaming, so they are covered.
+  * **Non-chat payload carrying ⟦tokens⟧ → EGRESS-RESTORE.** Architecture v2 has no
+    restore-on-return: the model works in token-space and its replies keep the
+    tokens. The ONLY place a real value re-enters is an actual outbound action —
+    sending the mail, posting to the API. A token in a request to a non-LLM host is
+    by definition leaked internal state that must become real for the action to
+    work, so it is restored here (mirroring the ``requests`` egress patch, which
+    cannot see httpx traffic).
 
-Safety:
-  * Acts only in MODE=enforce, and only on payloads that look like chat requests.
-  * Fail-open everywhere: any error → the original request goes out unchanged.
-  * Idempotent install(); kill-switch env HERMESCLOAK_HTTPX_OFF=1.
+Inbound: **nothing.** v1 rehydrated JSON responses here; v2 deliberately does not —
+no placeholders are replaced on return, anywhere.
+
+Encoding trap: httpx serializes ``json=`` bodies with ``ensure_ascii=True``, so a
+Hebrew token like ⟦לקוח_1⟧ arrives here as ``\\u27e6...`` escapes — a literal ``⟦``
+byte-scan misses it. Both forms are handled.
+
+Safety: masking acts only in MODE=enforce and only on chat-shaped payloads (a false
+positive would corrupt a non-LLM request). Egress restore is mode-independent —
+restoring a leaked token is always correct. Fail-open everywhere except a masking
+failure under ``fail_mode: closed``, which raises in OUR frame and genuinely blocks
+the request. Idempotent install(); kill-switch env HERMESCLOAK_HTTPX_OFF=1.
 """
 import json as _json
 import os
@@ -44,6 +46,8 @@ _TEXT_KEYS = frozenset({"text", "content", "prompt", "arguments"})
 _RECURSE_KEYS = frozenset({"parts", "tool_calls", "function", "input"})
 # Top-level request fields that carry conversation content.
 _PAYLOAD_ROOTS = ("messages", "system", "contents", "systemInstruction", "input")
+
+_TOKEN_MARKS = ("⟦", "\\u27e6")        # literal and JSON-escaped forms
 
 
 def _is_chat_payload(data) -> bool:
@@ -92,7 +96,7 @@ def _mask_payload(data, mask):
 
 
 def _restore_all(obj, restore):
-    """Blanket-restore every string — safe in this direction, no shape knowledge needed."""
+    """Blanket-restore every string. Safe: this runs only on ACTION egress bodies."""
     if isinstance(obj, str):
         return restore(obj)
     if isinstance(obj, list):
@@ -122,38 +126,106 @@ def _audit(kind: str, detail: dict) -> None:
         pass
 
 
-def _mask_request(request):
-    """Return a masked copy of `request`, or the original when nothing applies."""
+def _token_map() -> dict:
+    """token -> real, merged from ALL on-disk vaults plus this process's engine.
+
+    Disk first (cross-process/cross-session coverage — a model-written script can
+    carry a token minted in an earlier gateway session); the live engine's vault
+    then supplements with mappings from this very request cycle.
+    """
+    tm: dict = {}
+    try:
+        from hermescloak.egress import load_token_map
+        tm.update(load_token_map())
+    except Exception:
+        pass
+    try:
+        from hermescloak.adapter.hermes_live import _engine_for_home
+        tm.update(_engine_for_home().vault._token_to_real)
+    except Exception:
+        pass
+    return tm
+
+
+def _rebuild(request, new_bytes):
+    import httpx
+    headers = dict(request.headers)
+    headers.pop("content-length", None)              # httpx recomputes it
+    return httpx.Request(request.method, request.url, headers=headers,
+                         content=new_bytes, extensions=request.extensions)
+
+
+def _mask_chat(request, data):
+    """Masked copy of a chat request, or the original when nothing applies."""
+    eng = _engine()
+    if eng is None:
+        return request
+    masked, changed = _mask_payload(data, eng.mask_text)
+    if not changed:
+        return request
+    new_bytes = _json.dumps(masked, ensure_ascii=False).encode("utf-8")
+    from urllib.parse import urlparse
+    _audit("transport_masked", {"host": urlparse(str(request.url)).netloc,
+                                "entities": eng.vault.summary(),
+                                "real_values_in_outbound":
+                                    eng.vault.count_present(new_bytes.decode("utf-8", "replace"))})
+    return _rebuild(request, new_bytes)
+
+
+def _egress_restore(request, text, data):
+    """Restore ⟦tokens⟧ in a non-chat action body. Mode-independent."""
+    tm = _token_map()
+    if not tm:
+        return request
+
+    from hermescloak.tokens import TOKEN_RE, find_tokens
+
+    def _sub(s):
+        return TOKEN_RE.sub(lambda m: tm.get(m.group(0), m.group(0)), s)
+
+    if data is not None:                              # JSON body (either escape form)
+        restored = _restore_all(data, _sub)
+        if restored == data:
+            return request
+        new_text = _json.dumps(restored, ensure_ascii=False)
+    else:                                             # plain text body, literal tokens
+        new_text = _sub(text)
+        if new_text == text:
+            return request
+
+    leftover = [t for t in find_tokens(new_text) if t not in tm]
+    from urllib.parse import urlparse
+    _audit("egress_http_restored", {"host": urlparse(str(request.url)).netloc,
+                                    "leftover": len(leftover)})
+    if leftover:
+        _audit("egress_leftover", {"where": "httpx", "tokens": leftover})
+    return _rebuild(request, new_text.encode("utf-8"))
+
+
+def _process_request(request):
+    """Route one outbound request: chat → mask, token-bearing non-chat → restore."""
     try:
         body = request.content
-        if not body or b'"' not in body:
+        if not body:
             return request
-        eng = _engine()
-        if eng is None:
-            return request
-        data = _json.loads(body)
-        if not _is_chat_payload(data):
-            return request
-        masked, changed = _mask_payload(data, eng.mask_text)
-        if not changed:
-            return request
-        new_bytes = _json.dumps(masked, ensure_ascii=False).encode("utf-8")
-
-        import httpx
-        headers = dict(request.headers)
-        headers.pop("content-length", None)          # httpx recomputes it
-        new_req = httpx.Request(request.method, request.url, headers=headers,
-                                content=new_bytes, extensions=request.extensions)
-        from urllib.parse import urlparse
-        _audit("transport_masked", {"host": urlparse(str(request.url)).netloc,
-                                    "entities": eng.vault.summary(),
-                                    "real_values_in_outbound":
-                                        eng.vault.count_present(new_bytes.decode("utf-8", "replace"))})
-        return new_req
+        try:
+            text = body.decode("utf-8")
+        except Exception:
+            return request                            # binary body — not ours
+        data = None
+        if text[:1] in ("{", "["):
+            try:
+                data = _json.loads(text)
+            except Exception:
+                data = None
+        if isinstance(data, dict) and _is_chat_payload(data):
+            return _mask_chat(request, data)
+        if any(m in text for m in _TOKEN_MARKS):
+            return _egress_restore(request, text, data)
+        return request
     except Exception as exc:
-        # Unlike the source seams (whose try/except lives in hermes and swallows), this
-        # is our own frame — raising here genuinely stops the request leaving the box,
-        # so fail-closed is real at the transport layer without patching hermes at all.
+        # Our own frame — raising here genuinely stops the request leaving the box,
+        # so fail-closed is real at the transport layer without patching hermes.
         try:
             from hermescloak.adapter.hermes_live import fail_closed
             closed = fail_closed()
@@ -166,30 +238,8 @@ def _mask_request(request):
         return request                                # fail-open
 
 
-def _restore_response(response) -> None:
-    """Rehydrate ⟦tokens⟧ in an already-read JSON response, in place."""
-    try:
-        if "json" not in response.headers.get("content-type", ""):
-            return
-        raw = response.content
-        if b"\xe2\x9f\xa6" not in raw:                # UTF-8 for ⟦ — cheap guard
-            return
-        eng = _engine()
-        if eng is None:
-            return
-        from hermescloak.restorer import restore_text
-        data = _json.loads(raw)
-        restored = _restore_all(data, lambda s: restore_text(s, eng.vault))
-        new_bytes = _json.dumps(restored, ensure_ascii=False).encode("utf-8")
-        response._content = new_bytes                 # response is fully read here
-        response.headers["content-length"] = str(len(new_bytes))
-        _audit("transport_restored", {"bytes": len(new_bytes)})
-    except Exception:
-        pass                                          # fail-open
-
-
 def install(hermes_home: str | None = None) -> bool:
-    """Patch httpx so LLM traffic is masked outbound and restored inbound."""
+    """Patch httpx: mask LLM requests, egress-restore token-bearing action requests."""
     global _INSTALLED
     if _INSTALLED or os.environ.get("HERMESCLOAK_HTTPX_OFF") == "1":
         return False
@@ -204,11 +254,7 @@ def install(hermes_home: str | None = None) -> bool:
         _orig_send = httpx.Client.send
 
         def send(self, request, **kwargs):
-            request = _mask_request(request)
-            response = _orig_send(self, request, **kwargs)
-            if not kwargs.get("stream"):
-                _restore_response(response)
-            return response
+            return _orig_send(self, _process_request(request), **kwargs)
 
         send.__hermescloak_llm__ = True
         httpx.Client.send = send
@@ -217,11 +263,7 @@ def install(hermes_home: str | None = None) -> bool:
         _orig_asend = httpx.AsyncClient.send
 
         async def asend(self, request, **kwargs):
-            request = _mask_request(request)
-            response = await _orig_asend(self, request, **kwargs)
-            if not kwargs.get("stream"):
-                _restore_response(response)
-            return response
+            return await _orig_asend(self, _process_request(request), **kwargs)
 
         asend.__hermescloak_llm__ = True
         httpx.AsyncClient.send = asend

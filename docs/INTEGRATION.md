@@ -1,21 +1,25 @@
 # Integrating HermesCloak into hermes-agent
 
-HermesCloak is a plain Python library: it tokenizes PII in the messages an agent sends to a
-cloud model, and restores the real values in the response — so the cloud provider never sees
-client identity, while the agent and its tools keep working with real data.
+HermesCloak is a plain Python library: it tokenizes PII in everything an agent sends to a cloud
+model, and substitutes the real values back **only at egress** — inside the outbound action (the
+mail being sent, the API being posted to). The cloud provider never sees client identity; replies
+and transcripts stay in redacted token-space; actions still work with real data.
 
-hermes-agent has no plugin system, so HermesCloak is wired in via **three small, fail-open
-call-sites ("seams")** in the agent source. Each seam is wrapped in `try/except: pass`, so it
-can never raise into the agent, and it is **MODE-scoped** — an agent whose `$HERMES_HOME/cloak/`
-dir is absent or whose `MODE` is `off` is completely unaffected.
+**No hermes source is modified.** Two attachment points, both fail-open and **MODE-scoped** — an
+agent whose `$HERMES_HOME/cloak/` dir is absent or whose `MODE` is `off` is completely unaffected:
 
-> A hermes-agent version update overwrites the files these seams live in. See
-> **[UPGRADING.md](UPGRADING.md)** — re-run the installer after every update.
+| # | Mechanism | Covers |
+|---|-----------|--------|
+| 1 | **Context-engine plugin** — `CloakContextEngine` masks via hermes's documented `select_context()` hook (replaces the request list per call; persisted transcript untouched). Registered by a logic-free shim in `<hermes>/plugins/context_engine/cloak/`; selected by `context.engine: cloak`. Subclasses the built-in compressor, so compression behaviour is unchanged. | main conversation loop, every provider |
+| 2 | **HTTP-layer hooks** — an `httpx` patch (loaded at interpreter startup via a `.pth`) masks chat-shaped request bodies (the ~120 auxiliary call sites: titles, compression, vision, web-extract…) and egress-restores ⟦tokens⟧ in non-chat action bodies. A companion `requests` patch egress-restores in model-written scripts. | everything the agent loop never sees |
 
-## 1. Install the package (editable)
+> What can still break after a hermes update (venv rebuilds!) and the one command that proves the
+> cloak is live: **[UPGRADING.md](UPGRADING.md)**.
+
+## 1. Install the package (editable, into the AGENT'S venv)
 
 ```bash
-pip install -e /path/to/HermesCloak        # exposes `hermescloak` to the agent's venv
+$HERMES_HOME/hermes-agent/venv/bin/python -m pip install -e /path/to/HermesCloak
 ```
 
 ## 2. Configure the deployment (per agent, NOT in this repo)
@@ -24,36 +28,36 @@ Everything that identifies a deployment lives under `$HERMES_HOME/cloak/` — ne
 
 ```
 $HERMES_HOME/cloak/
-  MODE            # one of: off | shadow | enforce   (read live, per turn — no restart to change)
+  MODE            # one of: off | shadow | enforce   (read live — no restart to change)
   profile.yaml    # copy of profiles/example.yaml, adapted   (never_mask, languages, fail_mode, alerts)
   gazetteer.txt   # optional: known names, one "surface<TAB>type" per line (e.g. client list)
   ner_url         # optional: URL of the Hebrew NER microservice (see hermescloak/service/ner_service.py)
+  vaults/         # created automatically: per-agent token→real map (0600) — exists ONLY for egress
 ```
 
 - **`off`** (or dir absent) → passthrough, zero behaviour change.
 - **`shadow`** → run detection and audit *counts/types only* (never real PII), but send the
-  original to the cloud and restore nothing. Use this first to prove detection on real traffic
-  at zero risk.
-- **`enforce`** → tokenize outbound, restore inbound. Flip `shadow`→`enforce` with
-  `echo enforce > $HERMES_HOME/cloak/MODE` — no restart (MODE is read every turn).
-- **Kill switch:** `echo off > $HERMES_HOME/cloak/MODE` (instant).
+  original to the cloud. Use this first to prove detection on real traffic at zero risk.
+- **`enforce`** → mask outbound; egress-restore actions. Flip with
+  `echo enforce > $HERMES_HOME/cloak/MODE` — no restart (MODE is re-read within seconds).
+- **Kill switch:** `echo off > $HERMES_HOME/cloak/MODE` (instant). Egress restore stays active
+  regardless of MODE — restoring a leaked token is always correct.
+- **Back up `vaults/` nowhere you wouldn't put the client list itself** — it maps tokens to real
+  values. Exclude it from offsite backups or encrypt them.
 
-## 3. Install the seams
+## 3. Install the engine shim + transport autoloader
 
 ```bash
 python install/apply_hooks.py --apply --hermes-root /path/to/hermes-agent
-python install/apply_hooks.py --verify        # authoritative present/missing check
+# then select the engine in $HERMES_HOME/config.yaml:
+#   context:
+#     engine: cloak
+# and restart the gateway.
+python install/apply_hooks.py --verify --hermes-root /path/to/hermes-agent   # the doctor
 ```
 
-The three seams (`install/apply_hooks.py --print` emits the exact blocks):
-
-| Seam | File | What it does |
-|------|------|--------------|
-| **A — outbound** | `agent/chat_completion_helpers.py` (`build_api_kwargs`) | tokenize a **copy** of the messages before the transport encodes them — one choke point covering chat-completions / anthropic / codex / bedrock. |
-| **B — inbound** | `agent/conversation_loop.py` (after the assistant message is normalized) | restore real values in the reply **content + tool-call arguments**, before anything is persisted, executed, or sent. |
-| **C — streaming** | `gateway/run.py` (wraps `stream_delta_callback`) | restore `⟦tokens⟧` inside streamed deltas so the user-facing reply shows real values (buffers a token split across deltas). |
-
-After installing, **restart the gateway** so the agent process loads the patched files.
+The doctor proves the actual runtime chain (package importable by the agent's venv, shim present,
+engine selected, httpx patched at startup) and exits non-zero when the cloak cannot be live.
 
 ## 4. Verify it's live and healthy
 
@@ -61,25 +65,27 @@ The adapter writes an audit log (event kinds, counts, entity types — **never r
 
 ```bash
 tail $HERMES_HOME/cloak/audit.log
-# enforce_send  → "real_values_in_outbound": 0   (no detected value reached the cloud)
-# enforce_restore → "leftover": 0                (every token restored; >0 is the fail-safe signal)
+# enforce_send          → "real_values_in_outbound": 0  (main loop; via select_context)
+# transport_masked      → auxiliary LLM call masked at the transport
+# egress_http_restored  → an action left with real values substituted
+# egress_leftover       → a token could NOT be restored at egress — investigate
 ```
 
 `real_values_in_outbound` counts *detected* values that survived into the cloud-bound copy — it
-should always be `0`. A non-empty `leftover` means a token reached the reply unrestored (the
-fail-safe alarm — investigate).
+should always be `0`. Tokens in replies/transcripts are **normal** in v2 (that's the design);
+`egress_leftover` is the alarm that matters.
 
-## Why a library, not a proxy
+## Why in-process, not a proxy
 
 hermes-agent's codex transport is non-standard streaming; no OpenAI-compatible proxy can wrap it
-transparently. The in-process seams see the canonical message list before transport, so the same
-integration covers every backend.
+transparently. The engine hook sees the canonical message list before transport, so the same
+integration covers every backend — and the httpx hook catches what never passes the agent loop.
 
 ## Honest limits
 
 Detection is strong on structured identifiers (national ID with check-digit, phone, email, credit
 card via Luhn, case numbers) and on names that are in the gazetteer or caught by the NER model.
 It is **not airtight**: names not known to the gazetteer/NER, transliterated/foreign-script name
-forms, and free-text quasi-identifiers can pass through. Treat HermesCloak as strong risk
-**reduction**, not a guarantee — and see [AGENT-PROMPT.md](AGENT-PROMPT.md) for keeping the agent
-from defeating it.
+forms, and free-text quasi-identifiers can pass through. Bedrock (boto3) and non-Python
+subprocesses bypass the HTTP hooks. Treat HermesCloak as strong risk **reduction**, not a
+guarantee — and see [AGENT-PROMPT.md](AGENT-PROMPT.md) for keeping the agent from defeating it.

@@ -2,20 +2,6 @@ import json
 import hermescloak.adapter.hermes_live as live
 
 
-# --- fakes mirroring hermes' NormalizedResponse / tool_call shapes ---
-class _FakeFn:
-    def __init__(self, arguments):
-        self.arguments = arguments
-
-class _FakeTC:
-    def __init__(self, arguments):
-        self.function = _FakeFn(arguments)
-
-class _FakeMsg:
-    def __init__(self, content, tool_calls=None):
-        self.content = content
-        self.tool_calls = tool_calls or []
-
 class _FakeAgent:
     def __init__(self, sid):
         self.session_id = sid
@@ -23,6 +9,9 @@ class _FakeAgent:
 
 def _setup(tmp_path, monkeypatch, mode):
     live._ENGINES.clear()
+    live._TRANSPORT_ENGINES.clear()
+    live._AGENT_VAULTS.clear()
+    live._mode_cache.clear()
     home = tmp_path / "home"
     cloak = home / "cloak"
     cloak.mkdir(parents=True)
@@ -53,44 +42,32 @@ def test_shadow_sends_original_but_logs_detection(tmp_path, monkeypatch):
     assert summary.get("לקוח") == 1 and summary.get("טלפון") == 1
 
 
-def test_enforce_tokenizes_outbound_and_restores_inbound(tmp_path, monkeypatch):
+def test_enforce_tokenizes_outbound(tmp_path, monkeypatch):
     _setup(tmp_path, monkeypatch, "enforce")
     agent = _FakeAgent("s1")
     out = live.cloak_sanitize_outbound(agent, [{"role": "user", "content": "מייל לשירה לוי a@b.co.il"}])
     blob = " ".join(m["content"] for m in out)
     assert "שירה לוי" not in blob and "a@b.co.il" not in blob   # no real values to cloud
-    # model echoes tokens back; tool-call args are a JSON STRING (hermes shape)
-    msg = _FakeMsg("אשלח ל⟦לקוח_1⟧", [_FakeTC(json.dumps({"to": "⟦מייל_1⟧"}))])
-    restored = live.cloak_restore_inbound(agent, msg)
-    assert restored.content == "אשלח לשירה לוי"
-    assert json.loads(restored.tool_calls[0].function.arguments) == {"to": "a@b.co.il"}
+    assert "⟦" in blob
 
 
-def test_cloak_restore_text_for_rehydrates_outgoing(tmp_path, monkeypatch):
-    _setup(tmp_path, monkeypatch, "enforce")
-    agent = _FakeAgent("s1")
-    live.cloak_sanitize_outbound(agent, [{"role": "user", "content": "מייל לשירה לוי"}])
-    assert live.cloak_restore_text_for(agent, "אשלח ל⟦לקוח_1⟧") == "אשלח לשירה לוי"
+def test_no_restore_on_return_functions_exist():
+    """v2 contract: restore-on-return is GONE. A hermes checkout still carrying the
+    old B/C seams must degrade to a no-op via its own except-ImportError, which only
+    works if these names really are absent — a reintroduction would silently revive
+    the restore path, so pin their absence."""
+    assert not hasattr(live, "cloak_restore_inbound")
+    assert not hasattr(live, "cloak_filter_stream_delta")
+    assert not hasattr(live, "cloak_restore_text_for")
 
-def test_cloak_restore_text_for_noop_when_off(tmp_path, monkeypatch):
-    _setup(tmp_path, monkeypatch, "off")
-    assert live.cloak_restore_text_for(_FakeAgent("s1"), "x ⟦לקוח_1⟧") == "x ⟦לקוח_1⟧"
 
-def test_stream_delta_restored_across_split_tokens(tmp_path, monkeypatch):
-    _setup(tmp_path, monkeypatch, "enforce")
-    agent = _FakeAgent("s1")
-    live.cloak_sanitize_outbound(agent, [{"role": "user", "content": "מייל לשירה לוי"}])
-    state = {}
-    # the token ⟦לקוח_1⟧ arrives split across three deltas
-    out = ""
-    for chunk in ["התשובה: ", "⟦לקו", "ח_1⟧", " סוף"]:
-        out += live.cloak_filter_stream_delta(agent, state, chunk)
-    assert out == "התשובה: שירה לוי סוף"        # reassembled + restored, no token leaked
-    assert "⟦" not in out
+def test_engine_for_home_is_mode_independent_singleton(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch, "shadow")
+    a = live._engine_for_home()
+    b = live._engine_for_home()
+    assert a is b                                       # one engine per HERMES_HOME
+    assert live.transport_engine() is None              # transport acts only in enforce
 
-def test_stream_delta_noop_when_off(tmp_path, monkeypatch):
-    _setup(tmp_path, monkeypatch, "off")
-    assert live.cloak_filter_stream_delta(_FakeAgent("s1"), {}, "x ⟦לקוח_1⟧") == "x ⟦לקוח_1⟧"
 
 def test_enforce_failopen_on_engine_error(tmp_path, monkeypatch):
     _setup(tmp_path, monkeypatch, "enforce")

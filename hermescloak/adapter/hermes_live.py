@@ -143,16 +143,14 @@ def _engine_for(agent) -> Engine:
 _TRANSPORT_ENGINES: dict[str, Engine] = {}
 
 
-def transport_engine():
-    """Engine for this process's HERMES_HOME, for callers with no `agent` object.
+def _engine_for_home() -> Engine:
+    """The one Engine for this process's HERMES_HOME, regardless of MODE.
 
-    The transport hook fires far below the agent loop (inside httpx), where no agent
-    is in scope. It shares the same per-agent durable vault as the seams, so a token
-    minted by a seam restores at transport and vice versa.
-    Returns None unless MODE is enforce.
+    Shared by every caller that has no `agent` object in scope: the context-engine
+    plugin (select_context), the httpx transport hook, and shadow-mode probes. All of
+    them share the per-agent durable vault, so a token minted anywhere restores at
+    egress. Keyed by HERMES_HOME because one gateway process serves one profile.
     """
-    if _mode() != "enforce":
-        return None
     home = _home()
     with _LOCK:
         eng = _TRANSPORT_ENGINES.get(home)
@@ -160,6 +158,13 @@ def transport_engine():
             eng = _build_engine("transport")
             _TRANSPORT_ENGINES[home] = eng
         return eng
+
+
+def transport_engine():
+    """Engine for the transport hook. Returns None unless MODE is enforce."""
+    if _mode() != "enforce":
+        return None
+    return _engine_for_home()
 
 
 def cloak_sanitize_outbound(agent, api_messages):
@@ -190,83 +195,11 @@ def cloak_sanitize_outbound(agent, api_messages):
         return api_messages
 
 
-def cloak_restore_text_for(agent, text):
-    """Last-mile restore: rehydrate any ⟦token⟧ in an outgoing user-facing string
-    (e.g. the gateway's streamed/accumulated reply) via the session vault. Fail-open;
-    only acts in enforce when a token is present, so it's cheap and safe on every send."""
-    if _mode() != "enforce" or not isinstance(text, str) or "⟦" not in text:
-        return text
-    try:
-        from hermescloak.restorer import restore_text
-        return restore_text(text, _engine_for(agent).vault)
-    except Exception:
-        return text
-
-
-_MAX_TOKEN_HOLD = 48  # never hold back more than a plausible token's length
-
-
-def cloak_filter_stream_delta(agent, state, text):
-    """Restore ⟦tokens⟧ in a streaming delta BEFORE it reaches the gateway consumer,
-    so the accumulated/sent reply shows real values. Buffers an unmatched '⟦' until its
-    closing '⟧' arrives (tokens can split across deltas). `state` is a per-turn dict.
-    Fail-open: on any error, returns the original text."""
-    if _mode() != "enforce":
-        return text
-    try:
-        buf = state.get("buf", "") + (text or "")
-        open_idx = buf.rfind("⟦")
-        # hold back a trailing, still-open token (no ⟧ yet) only if it's short enough
-        if open_idx != -1 and "⟧" not in buf[open_idx:] and (len(buf) - open_idx) <= _MAX_TOKEN_HOLD:
-            emit, hold = buf[:open_idx], buf[open_idx:]
-        else:
-            emit, hold = buf, ""
-        state["buf"] = hold
-        if not emit:
-            return ""
-        from hermescloak.restorer import restore_text
-        return restore_text(emit, _engine_for(agent).vault)
-    except Exception:
-        return text
-
-
-def _arg_payload(raw):
-    """(payload_for_restore, was_json_string)."""
-    if isinstance(raw, str):
-        try:
-            return json.loads(raw), True
-        except Exception:
-            return raw, False
-    return raw, False
-
-
-def cloak_restore_inbound(agent, assistant_message):
-    if _mode() != "enforce":
-        return assistant_message  # nothing was tokenized outbound in off/shadow
-    try:
-        eng = _engine_for(agent)
-        tool_calls = list(getattr(assistant_message, "tool_calls", None) or [])
-        payload_tcs, meta = [], []
-        for tc in tool_calls:
-            raw = getattr(getattr(tc, "function", None), "arguments", None)
-            payload, was_json = _arg_payload(raw)
-            payload_tcs.append({"function": {"arguments": payload}})
-            meta.append(was_json)
-        resp = {"content": getattr(assistant_message, "content", None), "tool_calls": payload_tcs}
-        restored, report = eng.restore_inbound(resp)
-        if isinstance(getattr(assistant_message, "content", None), str) or restored["content"] is not None:
-            assistant_message.content = restored["content"]
-        for i, tc in enumerate(tool_calls):
-            val = restored["tool_calls"][i]["function"]["arguments"]
-            if meta[i]:
-                tc.function.arguments = json.dumps(val, ensure_ascii=False)
-            else:
-                tc.function.arguments = val
-        _audit("enforce_restore", json.dumps(
-            {"restored": report.restored_any, "leftover": len(report.leftover)}, ensure_ascii=False))
-        if report.leftover:
-            _audit("leftover_token", ",".join(report.leftover))
-        return assistant_message
-    except Exception as exc:  # noqa: BLE001 — fail-open
-        _audit("restore_error", repr(exc))
-        return assistant_message
+# Architecture v2 has NO restore-on-return. ``cloak_restore_inbound``,
+# ``cloak_restore_text_for`` and ``cloak_filter_stream_delta`` (seams B and C) were
+# deleted here: the model works in token-space, replies keep their ⟦tokens⟧, and real
+# values re-enter only at true egress (hermescloak.egress + the transport hook's
+# non-chat restore path). A hermes checkout still carrying the old seams degrades
+# cleanly — the seams' own try/except swallows the ImportError into a no-op.
+# ``cloak_sanitize_outbound`` above is kept callable for the same transitional
+# reason: a leftover seam A just re-masks already-masked text, which is idempotent.

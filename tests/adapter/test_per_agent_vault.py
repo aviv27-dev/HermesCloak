@@ -1,6 +1,7 @@
-"""Per-agent persistent vault via the live adapter: tokens stay restorable across
-BOTH a gateway restart AND a different session — so no broken deliverables.
-Reproduces the field failure (⟦מזהה_n⟧ left in an output) and proves it's fixed."""
+"""Per-agent persistent vault: tokens minted before a gateway restart must still be
+EGRESS-restorable after it — in v2 the durable vault exists for exactly one consumer,
+the egress restore path (no restore-on-return exists). A restart that lost the map
+would strand ⟦tokens⟧ in outbound actions forever."""
 import importlib
 import os
 
@@ -23,7 +24,7 @@ class _Agent:
         self.session_id = sid
 
 
-def test_restore_survives_restart_and_new_session(tmp_path):
+def test_egress_restore_survives_restart(tmp_path):
     home = str(tmp_path / "hermes")
     hl = _fresh_adapter(home)
 
@@ -36,25 +37,15 @@ def test_restore_survives_restart_and_new_session(tmp_path):
     # SIMULATE GATEWAY RESTART: wipe ALL in-memory state (engines + the per-agent vault cache)
     hl._ENGINES.clear()
     hl._AGENT_VAULTS.clear()
+    hl._TRANSPORT_ENGINES.clear()
 
-    # ... and the work continues in a DIFFERENT session B (compaction / new conversation).
-    # The model's reply echoes session A's tokens; restoring must still yield real values.
-    b = _Agent("conversation-B")
-
-    class Fn:
-        def __init__(s, args): s.arguments = args
-    class Tc:
-        def __init__(s, args): s.function = Fn(args)
-    class Msg:
-        def __init__(s, content, tcs): s.content = content; s.tool_calls = tcs
-
-    reply = Msg(sent, [Tc('{"body": "' + sent.replace('"', '\\"') + '"}')])
-    hl.cloak_restore_inbound(b, reply)
-
-    assert "דנה כהן" in reply.content and "100000009" in reply.content   # restored across restart+session
-    assert "⟦" not in reply.content                                       # no leftover token survives
-    args = reply.tool_calls[0].function.arguments
-    assert "100000009" in args and "⟦" not in args                        # tool-arg (deliverable) also clean
+    # An outbound ACTION (email body, API call) later carries session A's tokens.
+    # The on-disk vault must restore them — this is the only restore path in v2.
+    from hermescloak.egress import restore_content
+    restored, leftover = restore_content(sent, home)
+    assert "דנה כהן" in restored and "100000009" in restored
+    assert "⟦" not in restored
+    assert leftover == []
 
 
 def test_same_value_same_token_across_sessions(tmp_path):
@@ -63,7 +54,8 @@ def test_same_value_same_token_across_sessions(tmp_path):
     a = hl.cloak_sanitize_outbound(_Agent("s1"), [{"role": "user", "content": "ת\"ז 100000009"}])[-1]["content"]
     hl._ENGINES.clear(); hl._AGENT_VAULTS.clear()             # restart
     b = hl.cloak_sanitize_outbound(_Agent("s2"), [{"role": "user", "content": "שוב ת\"ז 100000009"}])[-1]["content"]
-    # the same real value gets the SAME token across the restart+new session (shared per-agent vault)
+    # the same real value gets the SAME token across the restart+new session (shared
+    # per-agent vault) — coreference for the model AND prompt-cache prefix stability
     import re
     ta = re.findall(r"⟦[^⟧]+⟧", a); tb = re.findall(r"⟦[^⟧]+⟧", b)
     assert ta and tb and ta[0] == tb[0]

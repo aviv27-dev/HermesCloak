@@ -1,91 +1,60 @@
 #!/usr/bin/env python3
-"""Install / verify the HermesCloak seams in a hermes-agent checkout.
+"""Install / verify HermesCloak architecture v2 in a hermes-agent checkout.
 
-hermes-agent has no plugin system, so HermesCloak is wired by inserting three tiny,
-fail-open call-sites ("seams") into the agent source. A hermes-agent **version update
-overwrites those files** — so after every update you re-run this to re-apply + verify.
+v1 wired the cloak by inserting three source seams into hermes-agent files; every
+hermes update rewrote them (0.20.0 broke seam C's anchor outright) and a venv rebuild
+could silently disarm the package behind a green check. v2 has NO source seams:
+
+  A. **Context-engine plugin** — a thin shim at
+     ``<hermes>/plugins/context_engine/cloak/__init__.py`` registers
+     ``CloakContextEngine`` (hermescloak.adapter.context_engine), which masks the
+     main loop through the supported ``select_context()`` hook. Selected by
+     ``context.engine: cloak`` in config.yaml. The shim is untracked, logic-free,
+     and survives ``git pull``.
+  B. **httpx transport hook** — loaded at interpreter startup via the ``.pth``
+     autoloader (install/egress_autoload.py): masks auxiliary LLM traffic, restores
+     ⟦tokens⟧ in outbound ACTION bodies. There is no restore-on-return anywhere.
 
 Usage:
-  python install/apply_hooks.py --verify                 # report which seams are present
-  python install/apply_hooks.py --apply                  # insert missing seams (idempotent)
-  python install/apply_hooks.py --print                  # print the blocks for manual paste
-  python install/apply_hooks.py --apply --hermes-root /path/to/hermes-agent
+  python install/apply_hooks.py --apply   --hermes-root <ROOT>   # install shim + .pth
+  python install/apply_hooks.py --verify  --hermes-root <ROOT>   # doctor: full check
+  python install/apply_hooks.py --remove  --hermes-root <ROOT>   # remove the shim
 
 Default hermes root: $HERMES_AGENT_ROOT, else $HERMES_HOME/hermes-agent, else ./hermes-agent.
 
-Each seam is guarded by `try/except: pass`, so even a wrong/edited insertion can never
-raise into the agent. `--verify` is the authoritative check (substring of a stable
-sentinel). `--apply` is best-effort anchor insertion; if an anchor is not found (e.g. a
-future hermes refactor moved it), it prints the block + location for a 30-second manual paste.
-The streaming seam (C) is wrap-style (it replaces the stream_delta_callback assignment); it
-auto-applies by anchoring on that line, and only falls back to manual-print if a refactor
-renames the anchor.
-
-Automate it so an update never silently drops the privacy layer (see docs/UPGRADING.md):
-  * systemd: add `ExecStartPre=-python install/apply_hooks.py --apply --hermes-root <ROOT>` to the
-    gateway unit — re-applies on every start (a restart always follows an update). Non-fatal.
-  * git: a `post-merge` hook in the hermes-agent checkout that runs `--apply --verify`.
+``--verify`` is the doctor. It proves each link of the actual runtime chain — not
+just file presence — and exits non-zero when the cloak cannot be live:
+  1. hermescloak importable by the venv interpreter that RUNS the agent
+     (probed from a neutral cwd: `python -c` puts the cwd on sys.path, so probing
+     from a hermescloak checkout would self-green);
+  2. the cloak engine shim present and loadable;
+  3. ``context.engine: cloak`` selected in $HERMES_HOME/config.yaml;
+  4. the .pth autoloader present and actually patching httpx;
+  5. leftover v1 seams reported (informational — they degrade to no-ops).
 """
 import argparse
 import os
+import subprocess
 import sys
+import tempfile
 
-SENTINEL = "HermesCloak:"
+SHIM_RELPATH = os.path.join("plugins", "context_engine", "cloak", "__init__.py")
 
-# Seam A — OUTBOUND tokenize. Simple insert right after the build_api_kwargs docstring.
-A_FILE = "agent/chat_completion_helpers.py"
-A_ANCHOR = '    """Build the keyword arguments dict for the active API mode."""'
-A_BLOCK = '''    try:  # HermesCloak: tokenize a COPY of outbound messages before the cloud (MODE-scoped, fail-open)
-        from hermescloak.adapter.hermes_live import cloak_sanitize_outbound
-        api_messages = cloak_sanitize_outbound(agent, api_messages)
-    except Exception as _cloak_exc:
-        # fail-open by default, but a profile with fail_mode: closed asks for the send to
-        # be BLOCKED on a masking failure — swallowing that here would forward the
-        # unmasked messages and silently defeat the setting. Name-checked so this line
-        # needs no import on the failure path.
-        if type(_cloak_exc).__name__ == "CloakFailClosed":
-            raise
-        pass'''
+SHIM = '''"""HermesCloak context-engine shim — the ONLY file inside the hermes checkout.
 
-# Seam B — INBOUND restore. Insert after the transport-agnostic assistant-message convergence.
-B_FILE = "agent/conversation_loop.py"
-B_ANCHOR = "            assistant_message = normalized"
-B_BLOCK = '''            try:  # HermesCloak: restore real values (content + tool-call args) — codex-safe convergence
-                from hermescloak.adapter.hermes_live import cloak_restore_inbound
-                assistant_message = cloak_restore_inbound(agent, assistant_message)
-            except Exception:
-                pass'''
+Logic-free on purpose: everything lives in the hermescloak package, so a hermes
+update can at worst delete this file (it is untracked; `git pull` won't touch it),
+and `apply_hooks.py --verify` catches that. Selected via `context.engine: cloak`.
+"""
 
-# Seam C — STREAMING last-mile restore. WRAP-style: replaces the stream_delta_callback
-# assignment with a version that filters ⟦tokens⟧ out of streamed deltas. Auto: anchors on the
-# assignment line and wraps it (idempotent). Falls back to manual-print if a future hermes
-# refactor renames the anchor (verify stays authoritative).
-C_FILE = "gateway/run.py"
-C_ANCHOR = "            agent.stream_delta_callback = _stream_delta_cb"
-C_BLOCK = '''            # HermesCloak: restore ⟦tokens⟧ in streamed deltas before they reach the gateway
-            # consumer, so the user-facing reply shows real values (enforce-only, fail-open).
-            if _stream_delta_cb is not None:
-                try:
-                    from hermescloak.adapter.hermes_live import cloak_filter_stream_delta as _cloak_sd
-                    _cloak_sd_state = {}
-                    def _cloak_stream_delta_cb(_t, __cb=_stream_delta_cb, __ag=agent, __st=_cloak_sd_state):
-                        _out = _cloak_sd(__ag, __st, _t)
-                        if _out:
-                            __cb(_out)
-                    agent.stream_delta_callback = _cloak_stream_delta_cb
-                except Exception:
-                    agent.stream_delta_callback = _stream_delta_cb
-            else:
-                agent.stream_delta_callback = _stream_delta_cb'''
 
-SEAMS = [
-    {"name": "A outbound (chat_completion_helpers)", "file": A_FILE, "anchor": A_ANCHOR,
-     "block": A_BLOCK, "auto": True, "after": True},
-    {"name": "B inbound  (conversation_loop)", "file": B_FILE, "anchor": B_ANCHOR,
-     "block": B_BLOCK, "auto": True, "after": True},
-    {"name": "C stream   (gateway/run)", "file": C_FILE, "anchor": C_ANCHOR,
-     "block": C_BLOCK, "auto": True, "wrap": True},
-]
+def register(ctx):
+    try:
+        from hermescloak.adapter.context_engine import register as _register
+        _register(ctx)
+    except Exception:
+        pass          # hermescloak missing from the venv -> engine simply not offered
+'''
 
 
 def hermes_root(cli):
@@ -94,11 +63,6 @@ def hermes_root(cli):
     return (os.environ.get("HERMES_AGENT_ROOT")
             or (os.path.join(os.environ["HERMES_HOME"], "hermes-agent") if os.environ.get("HERMES_HOME") else None)
             or os.path.join(os.getcwd(), "hermes-agent"))
-
-
-def _read(path):
-    with open(path, encoding="utf-8") as f:
-        return f.read()
 
 
 def _venv_python(root, override=None):
@@ -113,29 +77,23 @@ def _venv_python(root, override=None):
     return None
 
 
-def verify_importable(root, venv_python=None):
-    """Can the agent's interpreter import hermescloak?
+def _hermes_home():
+    return os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
 
-    THIS is the check that matters. The seams are `try/except: pass`, so when the
-    package is missing from the agent's venv they degrade to silent no-ops: masking
-    is completely off while a seams-only check still reports a healthy green. A
-    hermes-agent upgrade rebuilds that venv and wipes the install, leaving the seam
-    source text behind — exactly the state that produces a false green.
-    """
+
+# ---------------------------------------------------------------- checks --
+
+def check_importable(root, venv_python=None):
+    """1. Can the agent's interpreter import hermescloak? None = unprovable."""
     py = _venv_python(root, venv_python)
     if py is None:
         print("  [WARN   ] no venv found under the hermes root — cannot prove importability")
         print("            pass --venv-python <path> to check the real interpreter")
-        return None                      # unknown, not proven-bad
-    import subprocess
-    import tempfile
+        return None
     try:
-        # cwd MUST be neutral: `python -c` puts the current directory on sys.path, so
-        # running this from a hermescloak checkout would import the local source tree and
-        # report a green that the real gateway (different cwd) would never see.
         r = subprocess.run([py, "-c", "import hermescloak; print(hermescloak.__file__)"],
                            capture_output=True, timeout=30, cwd=tempfile.gettempdir())
-    except Exception as exc:             # noqa: BLE001 — report, never raise
+    except Exception as exc:                 # noqa: BLE001 — report, never raise
         print(f"  [WARN   ] could not run {py}: {exc!r}")
         return None
     if r.returncode == 0:
@@ -144,91 +102,165 @@ def verify_importable(root, venv_python=None):
         print(f"            resolved from: {origin}")
         return True
     print(f"  [BROKEN ] hermescloak NOT importable by {py}")
-    print("            → the seams are present but INERT: masking is OFF.")
+    print("            → the cloak cannot load AT ALL in the agent process.")
     print(f"            → fix: {py} -m pip install -e <hermescloak checkout>")
     return False
 
 
+def check_shim(root):
+    """2. Engine shim present in plugins/context_engine/cloak/."""
+    p = os.path.join(root, SHIM_RELPATH)
+    if os.path.exists(p) and "hermescloak.adapter.context_engine" in open(p, encoding="utf-8").read():
+        print(f"  [OK     ] engine shim present ({SHIM_RELPATH})")
+        return True
+    print(f"  [MISSING] engine shim not installed → run --apply")
+    return False
+
+
+def check_config_selects_cloak():
+    """3. config.yaml actually selects the engine. Without this everything above is inert."""
+    cfg = os.path.join(_hermes_home(), "config.yaml")
+    try:
+        with open(cfg, encoding="utf-8") as fh:
+            text = fh.read()
+    except Exception as exc:                 # noqa: BLE001
+        print(f"  [WARN   ] could not read {cfg}: {exc!r}")
+        return None
+    try:
+        import yaml
+        data = yaml.safe_load(text) or {}
+        engine = ((data.get("context") or {}).get("engine") or "compressor")
+    except Exception:
+        # this script must run with ANY python (system python has no yaml) — fall
+        # back to a shape-aware scan for the two-line `context:\n  engine: X` block
+        import re
+        m = re.search(r"^context:\s*\n(?:[ \t]+\w+.*\n)*?[ \t]+engine:[ \t]*([\w-]+)",
+                      text, re.MULTILINE)
+        engine = m.group(1) if m else "compressor"
+    if engine == "cloak":
+        print(f"  [OK     ] context.engine: cloak selected ({cfg})")
+        return True
+    print(f"  [OFF    ] context.engine is '{engine}' (not 'cloak') in {cfg}")
+    print("            → the engine is installed but NOT selected; main-loop masking is off.")
+    print("            → set:\n                context:\n                  engine: cloak")
+    return False
+
+
+def check_pth(root, venv_python=None):
+    """4. .pth autoloader present AND actually patching httpx in a fresh interpreter."""
+    py = _venv_python(root, venv_python)
+    if py is None:
+        return None
+    env = dict(os.environ, HERMES_HOME=_hermes_home())
+    code = ("import sys, httpx;"
+            "sys.exit(0 if getattr(httpx.Client.send,'__hermescloak_llm__',False) else 3)")
+    try:
+        r = subprocess.run([py, "-c", code], env=env, capture_output=True,
+                           timeout=30, cwd=tempfile.gettempdir())
+    except Exception as exc:                 # noqa: BLE001
+        print(f"  [WARN   ] could not probe the autoloader: {exc!r}")
+        return None
+    if r.returncode == 0:
+        print("  [OK     ] .pth autoloader live (httpx patched at interpreter startup)")
+        return True
+    print("  [MISSING] transport hook not loading at startup → run --apply")
+    return False
+
+
+def report_v1_seams(root):
+    """5. Informational: v1 seams left in the source degrade to harmless no-ops."""
+    remnants = []
+    for rel, marker in (("agent/chat_completion_helpers.py", "cloak_sanitize_outbound"),
+                        ("agent/conversation_loop.py", "cloak_restore_inbound"),
+                        ("gateway/run.py", "cloak_filter_stream_delta")):
+        p = os.path.join(root, rel)
+        try:
+            if marker in open(p, encoding="utf-8").read():
+                remnants.append(rel)
+        except Exception:
+            continue
+    if remnants:
+        print(f"  [INFO   ] v1 seam remnants in: {', '.join(remnants)}")
+        print("            harmless (their own try/except no-ops them; outbound seam")
+        print("            re-masking is idempotent) — drop them from any carried patch"
+              " at leisure.")
+
+
+# ----------------------------------------------------------------- verbs --
+
 def verify(root, venv_python=None):
-    print(f"hermes-agent root: {root}\n--- HermesCloak seam verification ---")
-    ok = True
-    for s in SEAMS:
-        p = os.path.join(root, s["file"])
-        # the seam-specific import symbol is the stable marker
-        sym = ("cloak_sanitize_outbound" if "A " in s["name"]
-               else "cloak_restore_inbound" if "B " in s["name"]
-               else "cloak_filter_stream_delta")
-        present = os.path.exists(p) and sym in _read(p)
-        print(f"  [{'OK     ' if present else 'MISSING'}] {s['name']}  ({s['file']})")
-        ok = ok and present
-    print("--- runtime check (seams are inert without this) ---")
-    importable = verify_importable(root, venv_python)
-    if importable is False:
-        ok = False
-    if ok and importable is None:
-        print("--- seams present, but the cloak could NOT be proven live ⚠ ---")
+    print(f"hermes-agent root: {root}\nHERMES_HOME:       {_hermes_home()}")
+    print("--- HermesCloak v2 verification (no seams — engine + transport) ---")
+    results = [check_importable(root, venv_python),
+               check_shim(root),
+               check_config_selects_cloak(),
+               check_pth(root, venv_python)]
+    report_v1_seams(root)
+    hard_fail = any(r is False for r in results)
+    unproven = any(r is None for r in results)
+    if hard_fail:
+        print("--- NOT PROTECTED — see above ---")
         return False
-    print("--- " + ("all seams present AND live ✓" if ok
-                    else "NOT PROTECTED — see above") + " ---")
-    return ok
+    if unproven:
+        print("--- installed, but not fully provable from here ⚠ ---")
+        return False
+    print("--- all four links live ✓ ---")
+    return True
 
 
-def apply(root, dry):
-    changed = 0
-    for s in SEAMS:
-        p = os.path.join(root, s["file"])
-        if not os.path.exists(p):
-            print(f"  ! {s['file']} not found — skip {s['name']}")
-            continue
-        src = _read(p)
-        sym = s["block"].split("import ")[-1].split(" as")[0].split("\n")[0].strip() if "import " in s["block"] else ""
-        if any(t in src for t in ("cloak_sanitize_outbound", "cloak_restore_inbound", "cloak_filter_stream_delta")
-               if t in s["block"]):
-            print(f"  = already present: {s['name']}")
-            continue
-        if not s["auto"] or s["anchor"] is None or s["anchor"] not in src:
-            print(f"  ⚠ manual insert needed: {s['name']}  (anchor not found or wrap-style)")
-            print(f"     → paste this block into {s['file']}:\n")
-            print("\n".join("       " + ln for ln in s["block"].splitlines()) + "\n")
-            continue
-        if s.get("wrap"):
-            new = src.replace(s["anchor"], s["block"], 1)   # replace the assignment with the wrapped version
-        else:
-            idx = src.index(s["anchor"]) + len(s["anchor"])
-            new = src[:idx] + "\n" + s["block"] + src[idx:]
-        if dry:
-            print(f"  [dry-run] would insert seam {s['name']} after anchor in {s['file']}")
-        else:
-            with open(p, "w", encoding="utf-8") as f:
-                f.write(new)
-            print(f"  ✓ inserted: {s['name']}")
-            changed += 1
-    if not dry:
-        print(f"\n{changed} seam(s) inserted. Run --verify to confirm, then restart the gateway.")
+def apply(root, venv_python=None):
+    # a) engine shim
+    p = os.path.join(root, SHIM_RELPATH)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(SHIM)
+    print(f"  ✓ wrote {p}")
+    # b) .pth autoloader, installed BY the venv interpreter so it lands in ITS site-packages
+    py = _venv_python(root, venv_python)
+    if py is None:
+        print("  ⚠ no venv found — install the .pth manually:")
+        print("      <venv-python> " + os.path.join(os.path.dirname(__file__), "egress_autoload.py") + " --apply")
+    else:
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "egress_autoload.py")
+        r = subprocess.run([py, script, "--apply"], env=dict(os.environ, HERMES_HOME=_hermes_home()))
+        print(f"  {'✓' if r.returncode == 0 else '⚠'} egress_autoload --apply via {py} (exit {r.returncode})")
+    # c) config is the operator's file — never rewritten here, only instructed
+    if check_config_selects_cloak() is not True:
+        print("  → finish by setting context.engine: cloak in config.yaml, then restart the gateway")
+    else:
+        print("  → restart the gateway to load the engine")
+
+
+def remove(root):
+    p = os.path.join(root, SHIM_RELPATH)
+    if os.path.exists(p):
+        os.remove(p)
+        print(f"  ✓ removed {p}")
+        try:
+            os.rmdir(os.path.dirname(p))
+        except OSError:
+            pass
+    else:
+        print(f"  = nothing to remove at {p}")
+    print("  → also set context.engine back to 'compressor' and (optionally) run"
+          " egress_autoload --remove")
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Install/verify HermesCloak seams in hermes-agent")
+    ap = argparse.ArgumentParser(description="Install/verify HermesCloak v2 (engine + transport, no seams)")
     ap.add_argument("--hermes-root", default=None)
     ap.add_argument("--venv-python", default=None,
                     help="interpreter that runs the agent (default: <root>/venv/bin/python)")
     ap.add_argument("--verify", action="store_true")
     ap.add_argument("--apply", action="store_true")
-    ap.add_argument("--print", dest="show", action="store_true", help="print all seam blocks")
-    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--remove", action="store_true")
     a = ap.parse_args()
     root = hermes_root(a.hermes_root)
-    if a.show:
-        for s in SEAMS:
-            print(f"\n=== {s['name']} — {s['file']} ===")
-            if s["anchor"]:
-                print(f"# insert AFTER the line:\n#   {s['anchor'].strip()}")
-            else:
-                print("# wrap-style — see the existing stream_delta_callback assignment")
-            print(s["block"])
-        return 0
     if a.apply:
-        apply(root, a.dry_run)
+        apply(root, a.venv_python)
+        return 0
+    if a.remove:
+        remove(root)
         return 0
     # default = verify
     return 0 if verify(root, a.venv_python) else 1

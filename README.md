@@ -1,8 +1,9 @@
 # HermesCloak
 
-Reversible PII pseudonymization for [Hermes](https://github.com/) LLM agents — so an agent can
-reason in the cloud over **placeholders** while real personal data never leaves your machine in the
-prompt, and is rehydrated the instant the model replies.
+One-way PII masking for [Hermes](https://github.com/) LLM agents — the agent reasons in the cloud
+over **stable placeholders**; real personal data never leaves your machine in a prompt, and is
+substituted back **only at true egress** (the actual outbound action: the email being sent, the API
+being called). Replies, transcripts and files keep the placeholders — like a redacted legal filing.
 
 ## Example
 
@@ -12,7 +13,8 @@ same token, so the model can still reason about who's who):
 ```text
 in :  "Email jane@firm.org, call 050-1234567, card 4111 1111 1111 1111"
 out:  "Email ⟦EMAIL_1⟧, call ⟦PHONE_1⟧, card ⟦CARD_1⟧"     ← only this reaches the cloud model
-       ↑ the model's reply is rehydrated back to the real values before you see, persist, or act on it
+       ↑ the reply keeps the tokens; the real value re-enters ONLY inside an outbound action
+         (e.g. the ⟦EMAIL_1⟧ in a sendMail body becomes jane@firm.org as the mail leaves)
 ```
 
 Structured identifiers (email, phone, credit card, national ID, case numbers) are detected
@@ -29,20 +31,25 @@ out:  "Client ⟦CLIENT_1⟧, ID ⟦ID_1⟧, phone ⟦PHONE_1⟧"
 > (NER) are on the [roadmap](docs/ROADMAP.md) — today, **personal names are detected in Hebrew**, while
 > the structured identifiers above work in any language.
 
-## How it works — contained placeholder lifecycle
+## How it works — one-way masking, egress-only restore
 
-Placeholders exist **only on the wire to and from the cloud model**. Your conversation, memory, and
-files always hold the **real** values. HermesCloak:
+There is **no restore-on-return**. The model works in token-space and its replies keep the tokens;
+what you gain for that trade is that the whole fragile rehydration machinery (response rewriting,
+streaming-delta buffering, per-reply restore passes) simply does not exist:
 
-1. **Outbound:** builds a *copy* of the messages headed to the model and replaces detected PII with
-   stable tokens like `⟦CLIENT_1⟧`, `⟦ID_1⟧` (same value → same token, for coreference). The canonical
-   conversation is never mutated.
-2. **Inbound:** the instant the response returns, it rehydrates **everything** — reply text *and
-   tool-call arguments* — before anything is persisted, executed, or sent. So when the agent writes
-   a file, sends an email, or runs a tool, that action uses the **real** value.
+1. **Outbound (mask):** a *copy* of the messages headed to the model has detected PII replaced with
+   stable tokens like `⟦CLIENT_1⟧`, `⟦ID_1⟧` (same value → same token — coreference for the model,
+   and a stable prompt-cache prefix). The canonical conversation is never mutated. Handles both
+   plain-string and multimodal (list-of-blocks) message content.
+2. **Return (nothing):** the reply — text and tool-call arguments — is kept exactly as the model
+   produced it, tokens included. Transcripts, session titles, drafted files read like a redacted
+   filing: `"נקבע דיון ל⟦לקוח_1⟧"`.
+3. **Egress (restore):** when the agent performs an outbound **action** — sends the mail, posts to
+   an API — any token in that action's body is substituted with the real value at the moment it
+   leaves (via the HTTP-layer egress hooks and `hermescloak.egress`). A token that cannot be
+   restored is audited as `leftover`, never dropped silently.
 
-A token therefore never touches disk. (This is the deliberate fix for the failure mode where
-pseudonymization tokens leak into persisted files/memory.)
+The token→real map (the per-agent vault, `0600` on disk) exists solely for step 3.
 
 ```python
 from hermescloak import Engine, Profile, StaticFileSource
@@ -50,10 +57,8 @@ from hermescloak import Engine, Profile, StaticFileSource
 eng = Engine(profile=Profile.from_yaml("profiles/example.yaml"),
              entity_source=StaticFileSource("names.txt"))
 
-outbound = eng.sanitize_outbound(messages)        # send `outbound` to the cloud model
-restored, report = eng.restore_inbound(response)  # rehydrate before persist/execute/send
-if report.leftover:                               # fail-safe signal (see "Honest limits")
-    ...  # alert / log
+outbound = eng.sanitize_outbound(messages)   # send `outbound` to the cloud model; that's it
+# no inbound step — restore happens only at egress (hermescloak.egress / the HTTP hooks)
 ```
 
 ## Detection
@@ -76,45 +81,47 @@ if report.leftover:                               # fail-safe signal (see "Hones
 The core has **no heavy dependencies** — it is plain Python + `pyyaml`. It does **not** use Presidio
 or spaCy; recognizers are built in. The optional Hebrew NER pulls `transformers`/`torch`.
 
-## Use it with hermes-agent
+## Use it with hermes-agent — no source seams
 
-HermesCloak wires into a hermes-agent checkout two ways. Everything that identifies a deployment
-(profile, name gazetteer, MODE) lives under `$HERMES_HOME/cloak/` — never in this repo.
+Earlier versions patched three "seams" into hermes-agent source files; every hermes update rewrote
+them (0.20.0 broke one anchor outright), so the privacy layer had to be re-applied — or carried as a
+rebased local commit — after every update. **v2 modifies no hermes source at all.** Everything that
+identifies a deployment (profile, name gazetteer, MODE) lives under `$HERMES_HOME/cloak/` — never in
+this repo.
 
-**1. Transport chokepoint (primary).** A patch on `httpx` — the library the OpenAI SDK, the
-Anthropic SDK and the native Gemini adapter all use — masks conversation content on the way out and
-rehydrates non-streaming JSON replies on the way back. This matters because the main chat completion
-is *not* the only thing that talks to a cloud model: hermes reaches models from ~120 auxiliary call
-sites (title generation, context compression, vision, web-extract, approval, MCP…), and
-`trajectory_compressor` calls the client directly. None of those pass a source seam, so without this
-your conversation history goes to the compression model and every session's first exchange goes to
-the title model in cleartext. Because it sits at the transport, **call sites added by future hermes
-versions are covered without a new seam.**
+**1. Context-engine plugin (main loop).** hermes ships a documented per-turn hook,
+`ContextEngine.select_context()`, that may replace the request message list for a single provider
+call while the persisted transcript stays untouched — exactly the outbound-masking contract.
+`CloakContextEngine` subclasses the built-in compressor (compression behaviour inherited unchanged)
+and masks through that hook. It is registered by a ten-line, logic-free shim in
+`<hermes>/plugins/context_engine/cloak/` — untracked, survives `git pull` — and selected with
+`context.engine: cloak` in config.yaml. A documented ABC survives refactors; an anchor line does not.
 
-Masking is deliberately *targeted* — only message-bearing subtrees (`messages`, `system`, `contents`,
-`systemInstruction`, `input`) are rewritten, so tool schemas and sampling params stay byte-identical.
-Restoring is *blanket* — any ⟦token⟧ in a reply is internal state that must become real again before
-it is persisted.
-
-**2. Three source seams (still needed).** The transport layer deliberately does not touch streaming
-responses, so the main chat path's inbound restore stays with seams B and C. Seam A remains the
-earliest masking point and the one that adds the token instruction.
-
-Known gaps: providers that do not use httpx (Bedrock via boto3, the `requests`-based image/video
-generation providers) and anything a model runs in a subprocess are **not** covered by the transport
-hook.
-
-- **[docs/INTEGRATION.md](docs/INTEGRATION.md)** — install the package, configure
-  `$HERMES_HOME/cloak/`, install the three seams (`install/apply_hooks.py`), verify via the audit log.
-- **[docs/AGENT-PROMPT.md](docs/AGENT-PROMPT.md)** — the automatic cloud-model token instruction +
-  an optional system-prompt note so the agent doesn't defeat or exfiltrate around the filter.
-- **[docs/UPGRADING.md](docs/UPGRADING.md)** — **a hermes-agent update overwrites the seams**; how to
-  re-apply + verify after every update so the privacy layer never goes silently off.
+**2. Transport hook (everything else).** A patch on `httpx` — the library under the OpenAI SDK, the
+Anthropic SDK and the native Gemini adapter — covers what the agent loop never sees: hermes reaches
+models from ~120 auxiliary call sites (title generation, context compression, vision, web-extract,
+approval, MCP…), and `trajectory_compressor` calls the client directly. Chat-shaped bodies are
+**masked** (message subtrees only — tool schemas and params stay byte-identical); non-chat bodies
+carrying ⟦tokens⟧ are **egress-restored** so actions leave with real values. Call sites added by
+future hermes versions are covered the moment they send a request. The companion `requests` patch
+does the same egress restore for model-written scripts.
 
 ```bash
-python install/apply_hooks.py --apply  --hermes-root /path/to/hermes-agent
-python install/apply_hooks.py --verify --hermes-root /path/to/hermes-agent
+python install/apply_hooks.py --apply  --hermes-root /path/to/hermes-agent   # shim + .pth
+python install/apply_hooks.py --verify --hermes-root /path/to/hermes-agent   # the doctor
+# then: context.engine: cloak in config.yaml, and restart the gateway
 ```
+
+Known gaps: providers that do not use httpx or requests (Bedrock via boto3), non-Python
+subprocesses, and tokens written into local files (deliberate — artifacts stay redacted; use
+`python -m hermescloak.egress restore <file>` when a real-values copy is needed).
+
+- **[docs/INTEGRATION.md](docs/INTEGRATION.md)** — install the package, configure
+  `$HERMES_HOME/cloak/`, run the installer, verify via the audit log.
+- **[docs/AGENT-PROMPT.md](docs/AGENT-PROMPT.md)** — the automatic cloud-model token instruction +
+  an optional system-prompt note so the agent doesn't defeat or exfiltrate around the filter.
+- **[docs/UPGRADING.md](docs/UPGRADING.md)** — what a hermes-agent update can still silently break
+  (venv rebuilds wiping the package) and the one command that proves the cloak is live.
 
 ## Try it — browser demo
 
