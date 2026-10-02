@@ -15,6 +15,19 @@ python install/apply_hooks.py --verify --hermes-root /path/to/hermes-agent      
 #   real AIAgent, fake cloud, OpenAI + Anthropic streaming with a tool loop → PROTECTED ✓
 ```
 
+### Optional: sandbox against a real model (no deployment touched)
+
+`install/live_sandbox.sh` installs the latest hermes-agent + HermesCloak into a throwaway venv and
+runs `install/live_model_check.py`: real AIAgent conversations against a **real model** (default
+Ollama Cloud, `OLLAMA_API_KEY` from the environment; override with `HC_LIVE_BASE_URL`,
+`HC_LIVE_API_KEY`, `HC_LIVE_MODEL`) through a local recording proxy that sees the exact bytes
+leaving the machine. Hard checks = the privacy guarantee (no synthetic real value in any outbound
+request in enforce mode); soft checks = how well that model keeps tokens intact.
+
+```bash
+OLLAMA_API_KEY=... bash install/live_sandbox.sh       # set the key in the environment, not in a chat
+```
+
 Synthetic test identity (add the name to `$HERMES_HOME/cloak/gazetteer.txt` for the test, remove
 it afterwards):
 
