@@ -2,7 +2,7 @@ name: Live model check
 
 # Real hermes-agent + HermesCloak against a real model (default Ollama Cloud), synthetic data only.
 # Start it by adding the `live-test` label to a PR, or (once merged to main) from the Actions tab.
-# Needs the repository secret OLLAMA_API_KEY.
+# Needs the repository secret OLLAMA_API_KEY (or OLLAMA_TEST_KEY).
 on:
   workflow_dispatch:
     inputs:
@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+      OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY || secrets.OLLAMA_TEST_KEY }}
       HC_LIVE_MODEL: ${{ inputs.model || vars.HC_LIVE_MODEL || 'gpt-oss:120b' }}
     steps:
       - uses: actions/checkout@v4
@@ -33,7 +33,7 @@ jobs:
       - name: Check secret
         run: |
           if [ -z "$OLLAMA_API_KEY" ]; then
-            echo "::error::Repository secret OLLAMA_API_KEY is not set (Settings → Secrets and variables → Actions)"
+            echo "::error::Repository secret OLLAMA_API_KEY (or OLLAMA_TEST_KEY) is not set (Settings → Secrets and variables → Actions)"
             exit 1
           fi
       - name: Live sandbox (offline e2e + real model)
