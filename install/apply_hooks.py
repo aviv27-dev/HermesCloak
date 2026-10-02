@@ -169,6 +169,20 @@ def audit_summary(hours=24.0):
     return last_active, counts
 
 
+def last_masked_summary():
+    """Entity-type counts from the latest enforce_send event (distinct values masked so far)."""
+    path = os.path.join(hermes_home(), "cloak", "audit.log")
+    last = None
+    try:
+        for line in open(path, encoding="utf-8"):
+            if '"enforce_send"' in line:
+                last = line
+        detail = json.loads(json.loads(last)["detail"]) if last else {}
+        return detail.get("entities") or {}
+    except Exception:
+        return {}
+
+
 def vault_status():
     out = []
     try:
@@ -243,6 +257,9 @@ def verify(root, strict=False):
         ok &= not bad
     if counts:
         print("  [info] events: " + ", ".join(f"{k}×{v}" for k, v in sorted(counts.items())))
+    masked = last_masked_summary()
+    if masked:
+        print("  [info] masked by type (distinct values): " + ", ".join(f"{k}: {v}" for k, v in sorted(masked.items())))
     inc = {k: counts[k] for k in INCIDENTS if counts.get(k)}
     for k in INFO:
         if counts.get(k):

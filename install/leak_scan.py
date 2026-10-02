@@ -74,6 +74,23 @@ def main():
         print("NOTHING TO VERIFY — no conversation reached the model in this window (no chat, or the "
               "messages never reached the agent)")
         return 3
+    # identifiers that are NOT in the corpus manifest (e.g. typed by the tester): counts only
+    import re
+    clear_text = re.sub(r"⟦[^⟧]*⟧", " ", blob)
+    nines = re.findall(r"(?<![\d\-./])\d{9}(?![\d\-./])", clear_text)
+
+    def _valid(d):
+        t = 0
+        for i, ch in enumerate(d):
+            x = int(ch) * (1 if i % 2 == 0 else 2)
+            t += x if x < 10 else x - 9
+        return t % 10 == 0
+
+    phones = re.findall(r"(?<!\d)05\d-?\d{7}(?!\d)", clear_text)
+    emails = re.findall(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", clear_text)
+    valid_ids = sum(_valid(d) for d in nines)
+    print(f"any identifiers in clear (corpus or typed): 9-digit numbers={len(nines)} "
+          f"(valid ID check digit={valid_ids}), mobile phones={len(phones)}, emails={len(emails)}")
     print(f"  {'type':30} {'expected':8} {'as token':>9} {'in clear':>9} / values")
     leaks = 0
     for typ, r in sorted(per.items(), key=lambda kv: (kv[1]["expected"] != "masked", kv[0])):
@@ -81,9 +98,12 @@ def main():
         print(f"  [{flag}] {typ:24} {r['expected']:8} {r['token']:>9} {r['leaked']:>9} / {r['values']}")
         if r["expected"] == "masked":
             leaks += r["leaked"]
-    print(("NO LEAKS of must-mask values ✓" if not leaks else f"{leaks} must-mask value(s) reached the model ✗")
+    leaks_any = leaks + valid_ids + len(phones) + len(emails)
+    print(("NO LEAKS of must-mask values ✓" if not leaks_any else
+           f"{leaks_any} identifier(s) reached the model in clear ✗ (corpus: {leaks}, any valid ID/phone/email: "
+           f"{valid_ids + len(phones) + len(emails)})")
           + " (a value only counts if the conversation actually brought that case to the model)")
-    return 1 if leaks else 0
+    return 1 if (leaks or valid_ids or phones or emails) else 0
 
 
 if __name__ == "__main__":
