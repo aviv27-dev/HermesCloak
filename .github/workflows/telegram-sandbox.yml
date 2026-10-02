@@ -1,0 +1,113 @@
+name: Telegram sandbox agent
+
+# A throwaway hermes agent on a GitHub runner — Telegram bot + Ollama Cloud model + HermesCloak in
+# ENFORCE mode — online for a fixed window so you can run docs/LIVE-TESTING.md from your phone.
+# SYNTHETIC DATA ONLY: the runner is GitHub's machine (the vault lives there for the run).
+#
+# Start: add the `live-telegram` label to the PR (remove + re-add to start another window).
+# Repository secrets:   TELEGRAM_AGLOGITCLOAK_BOT (bot token from @BotFather — a DEDICATED bot,
+#                       never a production agent's bot), TELEGRAM_ALLOWED_USERS (your numeric
+#                       Telegram id, from @userinfobot; comma-separated for several),
+#                       OLLAMA_API_KEY or OLLAMA_TEST_KEY.
+# Repository variables (optional): HC_LIVE_MODEL (default gpt-oss:120b),
+#                       TELEGRAM_SANDBOX_MINUTES (default 30, max 300).
+on:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: telegram-sandbox            # Telegram allows ONE poller per bot
+  cancel-in-progress: true
+
+jobs:
+  sandbox:
+    if: github.event.label.name == 'live-telegram'
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_AGLOGITCLOAK_BOT }}
+      TELEGRAM_ALLOWED_USERS: ${{ secrets.TELEGRAM_ALLOWED_USERS }}
+      OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY || secrets.OLLAMA_TEST_KEY }}
+      MODEL: ${{ vars.HC_LIVE_MODEL || 'gpt-oss:120b' }}
+      MINUTES: ${{ vars.TELEGRAM_SANDBOX_MINUTES || '30' }}
+      WORK: ${{ github.workspace }}/../sandbox
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Check secrets
+        run: |
+          missing=""
+          [ -n "$TELEGRAM_BOT_TOKEN" ]     || missing="$missing TELEGRAM_AGLOGITCLOAK_BOT"
+          [ -n "$TELEGRAM_ALLOWED_USERS" ] || missing="$missing TELEGRAM_ALLOWED_USERS"
+          [ -n "$OLLAMA_API_KEY" ]         || missing="$missing OLLAMA_API_KEY/OLLAMA_TEST_KEY"
+          if [ -n "$missing" ]; then echo "::error::missing repository secrets:$missing"; exit 1; fi
+          case "$MINUTES" in ''|*[!0-9]*) echo "::error::TELEGRAM_SANDBOX_MINUTES must be a number"; exit 1;; esac
+          [ "$MINUTES" -le 300 ] || { echo "::error::TELEGRAM_SANDBOX_MINUTES max is 300"; exit 1; }
+
+      - name: Install hermes-agent + HermesCloak
+        run: |
+          SANDBOX_INSTALL_ONLY=1 bash install/live_sandbox.sh
+          VIRTUAL_ENV="$WORK/venv" uv pip install -q "python-telegram-bot[webhooks]==22.8"   # hermes [telegram] extra
+
+      - name: Configure the sandbox agent
+        run: |
+          export HERMES_HOME="$RUNNER_TEMP/hermes-home"
+          echo "HERMES_HOME=$HERMES_HOME" >> "$GITHUB_ENV"
+          mkdir -p "$HERMES_HOME/cloak"
+          cat > "$HERMES_HOME/config.yaml" <<YAML
+          model:
+            default: "$MODEL"
+            provider: "ollama-cloud"
+          plugins:
+            enabled: [hermescloak]
+          YAML
+          echo enforce > "$HERMES_HOME/cloak/MODE"
+          printf 'ישראל ישראלי\tלקוח\nדנה בדיקה\tלקוח\n' > "$HERMES_HOME/cloak/gazetteer.txt"
+          cp profiles/example.yaml "$HERMES_HOME/cloak/profile.yaml"
+          "$WORK/venv/bin/python" install/apply_hooks.py --verify --hermes-root "$WORK/hermes-agent" | grep -v "^  \[info\]"
+
+      - name: Announce
+        run: |
+          for id in ${TELEGRAM_ALLOWED_USERS//,/ }; do
+            curl -s -o /dev/null "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              --data-urlencode "chat_id=$id" \
+              --data-urlencode "text=🧪 HermesCloak sandbox is online for ${MINUTES} min (model ${MODEL}, MODE=enforce). Synthetic data only — see docs/LIVE-TESTING.md." || true
+          done
+
+      - name: Run the gateway for the window
+        run: |
+          cd "$WORK/hermes-agent"
+          timeout --signal=INT --kill-after=60 "${MINUTES}m" "$WORK/venv/bin/hermes" gateway run --no-supervise \
+            > "$RUNNER_TEMP/gateway.log" 2>&1 || code=$?
+          echo "gateway exited (${code:-0}; 124 = window ended)"
+          # gateway.log is NOT uploaded/printed: it contains the conversation text
+          grep -ciE "traceback|error" "$RUNNER_TEMP/gateway.log" | xargs -I{} echo "gateway log error-ish lines: {}"
+
+      - name: Health summary
+        if: always()
+        run: |
+          [ -n "$HERMES_HOME" ] || exit 0
+          "$WORK/venv/bin/python" install/apply_hooks.py --verify --strict --hermes-root "$WORK/hermes-agent" || true
+          cp "$HERMES_HOME/cloak/audit.log"* "$RUNNER_TEMP/" 2>/dev/null || true
+
+      - name: Upload audit log (counts/types only — no real values)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hermescloak-audit
+          path: ${{ runner.temp }}/audit.log*
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Sign off
+        if: always()
+        run: |
+          for id in ${TELEGRAM_ALLOWED_USERS//,/ }; do
+            curl -s -o /dev/null "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              --data-urlencode "chat_id=$id" \
+              --data-urlencode "text=🧪 HermesCloak sandbox is offline. Audit summary is in the GitHub run." || true
+          done

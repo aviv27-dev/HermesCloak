@@ -31,6 +31,10 @@ EOF
 uv pip install -q -r "$WORK/reqs.txt"
 uv pip install -q --no-deps -e "$WORK/hermes-agent"
 uv pip install -q -e "$REPO[dev]"
+if [ "${SANDBOX_INSTALL_ONLY:-}" = "1" ]; then
+  echo "[sandbox] installed: $WORK/venv (hermes-agent at $WORK/hermes-agent)"
+  exit 0
+fi
 "$WORK/venv/bin/python" "$REPO/install/apply_hooks.py" --verify --hermes-root "$WORK/hermes-agent" >/dev/null 2>&1 || true
 echo "[sandbox] offline e2e (fake cloud):"
 "$WORK/venv/bin/python" "$REPO/install/e2e_check.py" --hermes-root "$WORK/hermes-agent" --provider openai | grep -E "FAIL|PROTECTED"
