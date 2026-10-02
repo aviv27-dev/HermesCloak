@@ -38,20 +38,23 @@ class Engine:
         # not once per message per API call — essential when re-tokenizing a long history each call.
         # Safe because the vault makes value→token stable, so identical content → identical output.
         # Bounded LRU: a long-lived gateway sees unbounded unique content (it used to grow forever).
-        self._content_cache: OrderedDict[str, str] = OrderedDict()
+        self._content_cache: OrderedDict[tuple, str] = OrderedDict()
         self._cache_lock = threading.Lock()
 
     CONTENT_CACHE_MAX = 4096
 
     def _tokenize_cached(self, content: str) -> str:
+        # keyed by vault size too: a value learned later must be masked in older content as well
+        key = (content, len(getattr(self.vault, "_token_to_real", ())))
         with self._cache_lock:
-            cached = self._content_cache.get(content)
+            cached = self._content_cache.get(key)
             if cached is not None:
-                self._content_cache.move_to_end(content)
+                self._content_cache.move_to_end(key)
                 return cached
         out = pseudonymize(content, self.detection, self.vault)
+        key = (content, len(getattr(self.vault, "_token_to_real", ())))
         with self._cache_lock:
-            self._content_cache[content] = out
+            self._content_cache[key] = out
             if len(self._content_cache) > self.CONTENT_CACHE_MAX:
                 self._content_cache.popitem(last=False)
         return out

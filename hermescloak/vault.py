@@ -33,6 +33,16 @@ class Vault:
             self._token_to_real[token] = real
             return token
 
+    def known_values(self) -> list[str]:
+        """Real values held, longest first (so an overlap resolves to the longer value)."""
+        with self._lock:
+            n = len(self._real_to_token)
+            cached = getattr(self, "_known_cache", None)
+            if cached is None or cached[0] != n:
+                cached = (n, sorted(self._real_to_token, key=len, reverse=True))
+                self._known_cache = cached
+            return cached[1]
+
     def restore_token(self, token: str) -> str | None:
         return self._token_to_real.get(token)
 

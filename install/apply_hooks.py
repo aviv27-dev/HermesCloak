@@ -241,6 +241,8 @@ def verify(root, strict=False):
         print(f"  [{'OK ' if not bad else 'MISSING'}] last plugin load {last.get('ts', '?')}: "
               + ("all interception points + self-test ok" if not bad else json.dumps(bad)))
         ok &= not bad
+    if counts:
+        print("  [info] events: " + ", ".join(f"{k}×{v}" for k, v in sorted(counts.items())))
     inc = {k: counts[k] for k in INCIDENTS if counts.get(k)}
     for k in INFO:
         if counts.get(k):

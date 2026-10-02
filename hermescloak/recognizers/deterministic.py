@@ -7,15 +7,40 @@ _DIGITS9 = re.compile(r"(?<!\d)\d{9}(?!\d)")
 # label-anchored ID / company number that MAY carry separators (hyphens/dots/spaces):
 # e.g. "ח.פ 51-454362-3", "ת.ז 12345678-9", "ע.מ: 514543623". Capture the digit group,
 # strip separators, validate the 9-digit Israeli check-digit.
+# Q: a label's quote/geresh — also in its JSON-escaped form (ת\"ז inside a tool result).
+_Q = r"(?:\\?[.\"״'׳])"
 _ID_LABELED = re.compile(
-    r'(?P<label>ח[.\"״\']?\s*פ|ת[.\"״\']?\s*ז|ע[.\"״\']?\s*מ|עוסק\s+מורשה|מספר\s+חברה|ח\.?\s*ל\.?\s*צ)'
+    r'(?P<label>ח' + _Q + r'?\s*פ|ת' + _Q + r'?\s*ז|ע' + _Q + r'?\s*מ|עוסק\s+מורשה|מספר\s+חברה|ח\.?\s*ל\.?\s*צ)'
     r'\s*[:#.\-]?\s*(?P<num>\d[\d.\-/ ]{7,13}\d)'
 )
 # real credit cards = 13-19 CONTIGUOUS digits, or uniform 4-digit groups ("4111 1111 1111 1111").
 # NOT a separator after every digit (that spanned unrelated numbers in CRM dumps → 52 false matches).
 _CARD = re.compile(r"(?<!\d)(?:\d{13,19}|\d{4}(?:[ -]\d{4}){2,4})(?!\d)")
-_CASE = re.compile(r'(?:פש"?ר|חדל"?פ|הוצל"?פ|ת"?א|ה"?פ|תיק)\s*:?\s*(\d{4,9})')
+# Israeli court-file prefixes (explicit list — a generic "X"Y" acronym would also catch ש"ח).
+# The number is captured WITH its "-MM-YY" suffix (e.g. ת"פ 34224-11-23), not just the head.
+_CASE_PREFIXES = ("פש|ר", "חדל|פ", "הוצל|פ", "ת|א", "ה|פ", "ת|פ", "תמ|ש", "ע|פ", "ע|א", "בש|א", "רע|א",
+                  "רע|פ", "בג|ץ", "עת|מ", "עע|מ", "תא|מ", "תא|ק", "ת|צ", "צ|א", "ת|ט", "ע|ח", "מ|ת",
+                  "ת|ק", "עב|ל", "ס|ע")
+# the quote may be ", ״ or (inside a JSON-encoded tool result) \"
+_CASE_PREFIX = "|".join(a + r'(?:\\?["״])?' + b for a, b in (p.split("|") for p in _CASE_PREFIXES)) + "|תיק"
+_CASE = re.compile(r'(?:' + _CASE_PREFIX + r')\s*(?:מס\\?[\'׳]?\s*)?:?\s*(\d{4,9}(?:-\d{1,2}-\d{2})?)(?![\d-])')
 _GUSH = re.compile(r"גוש\s*\d+\s*חלקה\s*\d+")
+# Street address: a street keyword + name + house number, optionally ", <city>". Matches inside a
+# glued proclitic too ("ברחוב הגפן 5", "לרחוב ..."). Over-masking a following word as "city" is
+# accepted (identity leaks are the costly failure).
+_ADDRESS = re.compile(
+    r"(?:רחוב|רח['׳]|שדרות|שד['׳]|סמטת|כיכר|(?<=מען: )דרך|(?<=מען:)דרך|(?<=כתובת: )דרך)\s+[^\d\n\\·,;:()]{2,30}?\s*\d{1,4}(?:\s*[/א-ת]\b)?"
+    r"(?:\s*,\s*[א-ת][א-ת\-–]*(?:\s[א-ת][א-ת\-–]*){0,2})?"
+)
+# Bank account number after its label (Hebrew) or an Israeli IBAN.
+_BANK = re.compile(r"(?:חשבון|ח-ן|חש['׳])\s*(?:בנק\s*)?(?:מס['׳.]?\s*|מספר\s*)?:?\s*(\d{4,12})(?![\d-])")
+_IBAN = re.compile(r"\bIL\d{2}(?:\s?\d{4}){4}\s?\d{3}\b")
+# Date of birth after its label.
+_DOB = re.compile(
+    r"(?:ילידת|יליד|ת\.?\s*לידה|תאריך\s+לידה|נולדה?\s+ב(?:יום)?)\s*:?\s*(\d{1,2}[./-]\d{1,2}[./-]\d{2,4})"
+)
+# Israeli vehicle plates: 123-45-678 / 12-345-67 (the dash layout makes them distinctive).
+_PLATE = re.compile(r"(?<![\d-])(?:\d{3}-\d{2}-\d{3}|\d{2}-\d{3}-\d{2})(?![\d-])")
 
 
 # Credentials (API keys, tokens, private keys). High-precision vendor formats only, plus a
@@ -34,7 +59,7 @@ _SECRETS = re.compile(
 )
 _SECRET_ASSIGN = re.compile(
     r"(?i)\b(?:password|passwd|pwd|secret|api[_\-]?key|access[_\-]?token|auth[_\-]?token|client[_\-]?secret)"
-    r"[\"']?\s*[:=]\s*[\"']?(?P<val>[^\s\"',;⟦⟧]{8,})"
+    r"\\?[\"']?\s*[:=]\s*\\?[\"']?(?P<val>[^\s\"',;⟦⟧\\]{8,})"
 )
 
 
@@ -92,6 +117,16 @@ class DeterministicRecognizer:
             spans.append(Span(m.start(1), m.end(1), "תיק", m.group(1)))
         for m in _GUSH.finditer(text):
             spans.append(Span(m.start(), m.end(), "גושחלקה", m.group(0)))
+        for m in _ADDRESS.finditer(text):
+            spans.append(Span(m.start(), m.end(), "כתובת", m.group(0).rstrip()))
+        for m in _BANK.finditer(text):
+            spans.append(Span(m.start(1), m.end(1), "חשבון", m.group(1)))
+        for m in _IBAN.finditer(text):
+            spans.append(Span(m.start(), m.end(), "חשבון", m.group(0)))
+        for m in _DOB.finditer(text):
+            spans.append(Span(m.start(1), m.end(1), "לידה", m.group(1)))
+        for m in _PLATE.finditer(text):
+            spans.append(Span(m.start(), m.end(), "רכב", m.group(0)))
         for m in _CARD.finditer(text):
             if _luhn(m.group(0)):
                 spans.append(Span(m.start(), m.end(), "אשראי", m.group(0)))

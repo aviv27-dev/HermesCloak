@@ -1,5 +1,11 @@
+import re
 from typing import Protocol
 from hermescloak.span import Span
+
+# Literal escape sequences inside JSON-encoded text (a tool result is often a JSON string):
+# "\\nאיתי כהן" must not glue the "n" onto the name. Replaced by spaces of the SAME length for
+# detection only, so every span offset still points into the original text.
+_ESCAPES = re.compile(r"\\[nrt]")
 
 _PROCLITICS = ("ל", "ב", "ו", "מ", "ה", "ש", "כ")
 
@@ -55,14 +61,27 @@ class DetectionEngine:
                 last_end = s.end
         return kept
 
+    @staticmethod
+    def _normalized(text: str) -> str:
+        return _ESCAPES.sub("  ", text) if "\\" in text else text
+
+    @staticmethod
+    def _rebase(spans: list[Span], text: str) -> list[Span]:
+        """Span texts from the ORIGINAL string (detection may have run on the normalized copy)."""
+        return [s if text[s.start:s.end] == s.text else Span(s.start, s.end, s.entity_type, text[s.start:s.end])
+                for s in spans]
+
     def detect_primary(self, text: str) -> list[Span]:
         """Deterministic + gazetteer only (no NER): cheap enough for per-response audits."""
-        return sorted(self._resolve(self._collect(self._primary, text)), key=lambda s: s.start)
+        norm = self._normalized(text)
+        return sorted(self._rebase(self._resolve(self._collect(self._primary, norm)), text),
+                      key=lambda s: s.start)
 
     def detect(self, text: str) -> list[Span]:
-        kept = self._resolve(self._collect(self._primary, text))
-        for s in self._resolve(self._collect(self._secondary, text)):
+        norm = self._normalized(text)
+        kept = self._resolve(self._collect(self._primary, norm))
+        for s in self._resolve(self._collect(self._secondary, norm)):
             if not any(_overlaps(s, k) for k in kept):
                 kept.append(s)
         kept.sort(key=lambda s: s.start)
-        return kept
+        return self._rebase(kept, text)
