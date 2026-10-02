@@ -63,12 +63,14 @@ class DurableVault(Vault):
             d = os.path.dirname(self.path)
             if d:
                 os.makedirs(d, exist_ok=True)
-            payload = {
-                "ts": _now(),
-                "real_to_token": self._real_to_token,
-                "token_to_real": self._token_to_real,
-                "counters": self._counters,
-            }
+            with self._lock:                  # snapshot: other sessions may tokenize concurrently
+                payload = {
+                    "ts": _now(),
+                    "real_to_token": dict(self._real_to_token),
+                    "token_to_real": dict(self._token_to_real),
+                    "counters": dict(self._counters),
+                }
+                self._dirty = False           # cleared under the lock: a racing tokenize re-dirties
             fd, tmp = tempfile.mkstemp(dir=d or ".", prefix=".vault-", suffix=".tmp")
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -81,9 +83,8 @@ class DurableVault(Vault):
             finally:
                 if os.path.exists(tmp):
                     os.remove(tmp)
-            self._dirty = False
         except Exception:
-            pass                              # never raise into the agent
+            self._dirty = True                # retry on the next save; never raise into the agent
 
     def _delete_file(self) -> None:
         try:

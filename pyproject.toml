@@ -1,6 +1,6 @@
 [project]
 name = "hermescloak"
-version = "0.1.0"
+version = "0.2.0"
 description = "Reversible PII pseudonymization for Hermes LLM agents (contained placeholder lifecycle)."
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
@@ -10,6 +10,10 @@ dependencies = ["pyyaml>=6.0"]
 # Hebrew NER via DictaBERT (CC BY 4.0 model — see NOTICE). Loaded only by the optional NER service.
 ner = ["transformers>=4.40", "torch>=2.0"]
 dev = ["pytest>=8.0"]
+
+# hermes-agent discovers pip-installed plugins through this group (opt-in: `hermes plugins enable hermescloak`).
+[project.entry-points."hermes_agent.plugins"]
+hermescloak = "hermescloak.hermes_plugin:register"
 
 [build-system]
 requires = ["setuptools>=68"]

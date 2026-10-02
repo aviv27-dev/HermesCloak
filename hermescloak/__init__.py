@@ -1,5 +1,5 @@
 """HermesCloak — reversible PII pseudonymization for Hermes LLM agents."""
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 # Lazy exports (PEP 562): importing a lightweight submodule (e.g. egress / the
 # requests integration loaded from a .pth at interpreter startup) must NOT drag in

@@ -1,4 +1,6 @@
 import copy
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from hermescloak.detection import DetectionEngine
 from hermescloak.entities import EntitySource
@@ -35,15 +37,28 @@ class Engine:
         # per-content cache: detection (incl. slow NER) runs once per unique message content,
         # not once per message per API call — essential when re-tokenizing a long history each call.
         # Safe because the vault makes value→token stable, so identical content → identical output.
-        self._content_cache: dict[str, str] = {}
+        # Bounded LRU: a long-lived gateway sees unbounded unique content (it used to grow forever).
+        self._content_cache: OrderedDict[str, str] = OrderedDict()
+        self._cache_lock = threading.Lock()
+
+    CONTENT_CACHE_MAX = 4096
 
     def _tokenize_cached(self, content: str) -> str:
-        cached = self._content_cache.get(content)
-        if cached is not None:
-            return cached
+        with self._cache_lock:
+            cached = self._content_cache.get(content)
+            if cached is not None:
+                self._content_cache.move_to_end(content)
+                return cached
         out = pseudonymize(content, self.detection, self.vault)
-        self._content_cache[content] = out
+        with self._cache_lock:
+            self._content_cache[content] = out
+            if len(self._content_cache) > self.CONTENT_CACHE_MAX:
+                self._content_cache.popitem(last=False)
         return out
+
+    def tokenize_text(self, text: str) -> str:
+        """Tokenize one string (cached). Used by the payload walker for provider-shaped requests."""
+        return self._tokenize_cached(text) if isinstance(text, str) and text else text
 
     def sanitize_outbound(self, messages: list[dict]) -> list[dict]:
         out = copy.deepcopy(messages)              # never mutate the canonical conversation
