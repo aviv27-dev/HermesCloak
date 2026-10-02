@@ -532,3 +532,19 @@ def test_cleared_vault_is_not_resurrected_by_a_live_process(tmp_path):
     c._seen = (0, 0, 0)
     c.sync()
     assert "vault_generation_changed" in c.events and c.restore_token("⟦T_77⟧") is None
+
+
+def test_processes_born_together_converge_on_one_generation(tmp_path):
+    p = str(tmp_path / "v.json")
+    a, b = DurableVault(p), DurableVault(p)                  # both start with no file
+    assert a.generation != b.generation
+    ta = a.tokenize("alice", "T")
+    b.tokenize("bob", "T")
+    import hermescloak.durable_vault as dv
+    for i in range(dv.COMPACT_EVERY + 2):                    # force compactions by both
+        (a if i % 2 else b).tokenize(f"v{i}", "T")
+    a.sync()
+    b.sync()
+    assert a.generation == b.generation
+    assert not [e for e in a.events + b.events if e in ("vault_generation_changed", "vault_cleared_elsewhere")]
+    assert a.restore_token(ta) == "alice" and b.restore_token(ta) == "alice"

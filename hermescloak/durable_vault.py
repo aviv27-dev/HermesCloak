@@ -167,6 +167,7 @@ class DurableVault(Vault):
         self._jlines = 0                       # journal entries since the last compaction
         self._last_sync = 0.0
         self._last_touch = 0.0
+        self._gen_persisted = False            # our generation is on disk / shared with others
         self.generation: str = ""
         self.memory_only = False               # set when the file cannot be safely written
         self.conflicts = 0                     # token clashes found while merging other writers
@@ -188,6 +189,8 @@ class DurableVault(Vault):
                 self._load()
         else:
             self._load()
+        if self.generation:
+            self._gen_persisted = True            # we joined an existing vault's lifetime
         if getattr(self, "_key_failure", None):
             self._go_memory_only(self._key_failure)
         if not self.generation:
@@ -325,11 +328,19 @@ class DurableVault(Vault):
         changed = False
         st = self._stat()
         if st is None and self._seen is not None and not self.is_empty():
-            if os.path.exists(self.path + ".cleared"):
-                # deleted ON PURPOSE (clear / TTL): drop our copy too — never write it back
-                self._reset_memory("vault_cleared_elsewhere")
-                self.generation = uuid.uuid4().hex
+            try:
+                cleared_gen = open(self.path + ".cleared", encoding="utf-8").read().strip()
+                cleared = cleared_gen in ("", self.generation)   # "" = TTL sweep of an idle vault
+            except OSError:
+                cleared = False
+            if cleared and not self._dirty:
+                # OUR generation was deleted on purpose (clear / TTL): drop our copy too —
+                # never write it back
+                self._swap_in(None, "vault_cleared_elsewhere")
+                self._seen = None
                 return True
+            if cleared:
+                self.events.append("vault_reset_deferred")    # unwritten mints: keep them
             # vanished without a tombstone (deleted by hand / lost): re-establish it from memory
             # rather than let another process restart the numbering and reuse our tokens
             self.events.append("vault_resurrected")
@@ -341,12 +352,20 @@ class DurableVault(Vault):
             try:
                 data = read_payload(self.path, self._key)
                 disk_gen = data.get("generation")
-                if (self._seen is not None and disk_gen and self.generation
-                        and disk_gen != self.generation):
-                    # the vault we were part of was dropped and a NEW one started: our in-memory
-                    # map belongs to a dead generation and must not leak into the new one
-                    self._reset_memory("vault_generation_changed")
-                self._merge(data.get("token_to_real") or {}, data.get("counters") or {}, disk_gen)
+                if disk_gen and disk_gen != self.generation and not self._gen_persisted:
+                    # we invented a generation before any file existed and someone else created
+                    # the vault first: CONVERGE on theirs (nothing of ours was cleared)
+                    with self._lock:
+                        self.generation = disk_gen
+                    self._gen_persisted = True
+                if disk_gen and disk_gen != self.generation and not self._dirty:
+                    # the generation we shared was dropped and a NEW vault started: our map
+                    # belongs to a dead lifetime and must not leak into the new one
+                    self._swap_in(data, "vault_generation_changed")
+                else:
+                    if disk_gen and disk_gen != self.generation:
+                        self.events.append("vault_reset_deferred")
+                    self._merge(data.get("token_to_real") or {}, data.get("counters") or {}, disk_gen)
                 self._seen = st
                 changed = True
             except VaultLocked:
@@ -423,6 +442,7 @@ class DurableVault(Vault):
                         os.remove(tmp)
             _fsync_dir(d)
             self._seen = self._stat()
+            self._gen_persisted = True
             try:
                 os.remove(self.path + ".cleared")   # a fresh vault lifetime has begun
             except OSError:
@@ -458,6 +478,7 @@ class DurableVault(Vault):
                 os.close(fd)
             self._joff += len(line)
             self._jlines += 1
+            self._gen_persisted = True
             if self._jlines >= COMPACT_EVERY or not os.path.exists(self.path):
                 self._compact()
         except Exception:
@@ -481,13 +502,25 @@ class DurableVault(Vault):
         except OSError:
             pass
 
-    def _reset_memory(self, reason: str) -> None:
+    def _swap_in(self, data: dict | None, reason: str) -> None:
+        """Atomically REPLACE the in-memory map with ``data`` (a snapshot payload, or None for
+        empty). Built first, swapped under the lock: a concurrent reader never sees a
+        half-empty map."""
+        t2r, r2t, counters = {}, {}, {}
+        for tok, real in ((data or {}).get("token_to_real") or {}).items():
+            t2r[tok] = real
+            r2t.setdefault(real, tok)
+        for k, v in ((data or {}).get("counters") or {}).items():
+            try:
+                counters[k] = int(v)
+            except (TypeError, ValueError):
+                pass
         with self._lock:
-            self._real_to_token, self._token_to_real, self._counters = {}, {}, {}
+            self._token_to_real, self._real_to_token, self._counters = t2r, r2t, counters
             self._dirty = False
-            self.generation = ""
+            self.generation = (data or {}).get("generation") or uuid.uuid4().hex
+            self._gen_persisted = data is not None
         self._joff = self._jlines = 0
-        self._seen = None
         self.events.append(reason)
 
     def _delete_file(self) -> None:
