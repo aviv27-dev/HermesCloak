@@ -176,10 +176,10 @@ class DurableVault(Vault):
                 _fernet(key)
             except ImportError:
                 self.memory_only = True
-                self.events.append("vault_crypto_unavailable")
+                self._key_failure = "vault_crypto_unavailable"
             except Exception:
                 self.memory_only = True
-                self.events.append("vault_key_invalid")
+                self._key_failure = "vault_key_invalid"
         if not self.memory_only:
             # every disk read happens under the cross-process lock: an unlocked read racing a
             # compaction could see an old snapshot + an already-emptied journal, believe it is
@@ -188,6 +188,8 @@ class DurableVault(Vault):
                 self._load()
         else:
             self._load()
+        if getattr(self, "_key_failure", None):
+            self._go_memory_only(self._key_failure)
         if not self.generation:
             self.generation = uuid.uuid4().hex
 
@@ -217,7 +219,12 @@ class DurableVault(Vault):
             return
         last = self._last_change()
         if self.ttl_seconds and last is not None and (_now() - last) > self.ttl_seconds:
-            self._delete_file()                  # expired → start fresh (new generation)
+            try:                                 # expired → start fresh (new generation)
+                old = read_payload(self.path, self._key).get("generation", "")
+            except Exception:
+                old = ""
+            self._delete_file()
+            self._tombstone(old)
             return
         locked_main = False
         for candidate in (self.path, self.path + ".bak"):
@@ -262,19 +269,21 @@ class DurableVault(Vault):
         if "vault_restored_from_backup" in self.events and not self.memory_only:
             self._compact()                      # re-establish the main file (lock already held)
 
-    def _go_memory_only(self) -> None:
-        """Stop touching disk (we cannot read what is there, so we must never write over it) and
+    def _go_memory_only(self, reason: str = "vault_locked") -> None:
+        """Stop touching disk (we cannot read what is there, so we must never write over it),
         mint from a far-away random number range so our tokens cannot collide with the ones the
-        processes that CAN read the file are issuing."""
-        if self.memory_only:
+        processes that CAN read the file are issuing, and take a private generation so nothing
+        keyed to generations (the shared replay cache) can mix our tokens with theirs."""
+        if getattr(self, "_memory_base", None) is not None:
             return
         self.memory_only = True
-        self.events.append("vault_locked")
+        self.events.append(reason)
         with self._lock:
             base = random.randrange(500_000, 990_000)
             for k in list(self._counters) or []:
                 self._counters[k] = max(self._counters[k], base)
             self._memory_base = base
+            self.generation = "mem-" + uuid.uuid4().hex
 
     def _merge(self, t2r: dict, counters: dict | None = None, generation=None) -> None:
         """Adopt another writer's mappings without ever breaking our own."""
@@ -316,8 +325,13 @@ class DurableVault(Vault):
         changed = False
         st = self._stat()
         if st is None and self._seen is not None and not self.is_empty():
-            # our snapshot vanished under us (swept / deleted by hand): re-establish it from
-            # memory rather than let another process start numbering from scratch
+            if os.path.exists(self.path + ".cleared"):
+                # deleted ON PURPOSE (clear / TTL): drop our copy too — never write it back
+                self._reset_memory("vault_cleared_elsewhere")
+                self.generation = uuid.uuid4().hex
+                return True
+            # vanished without a tombstone (deleted by hand / lost): re-establish it from memory
+            # rather than let another process restart the numbering and reuse our tokens
             self.events.append("vault_resurrected")
             self._dirty = True
             self._compact()
@@ -326,8 +340,13 @@ class DurableVault(Vault):
             self._joff = 0                        # a new snapshot comes with a fresh journal
             try:
                 data = read_payload(self.path, self._key)
-                self._merge(data.get("token_to_real") or {}, data.get("counters") or {},
-                            data.get("generation"))
+                disk_gen = data.get("generation")
+                if (self._seen is not None and disk_gen and self.generation
+                        and disk_gen != self.generation):
+                    # the vault we were part of was dropped and a NEW one started: our in-memory
+                    # map belongs to a dead generation and must not leak into the new one
+                    self._reset_memory("vault_generation_changed")
+                self._merge(data.get("token_to_real") or {}, data.get("counters") or {}, disk_gen)
                 self._seen = st
                 changed = True
             except VaultLocked:
@@ -350,7 +369,8 @@ class DurableVault(Vault):
         """Mark the vault as IN USE (TTL counts from last use, not last new value), at most
         every 5 minutes. Without this a busy gateway that only reuses known values let the
         file 'expire' and another process swept it and restarted the numbering."""
-        if self.memory_only or _now() - self._last_touch < 300:
+        every = min(300.0, (self.ttl_seconds or 1200) / 4)
+        if self.memory_only or _now() - self._last_touch < every:
             return
         self._last_touch = _now()
         try:
@@ -403,6 +423,10 @@ class DurableVault(Vault):
                         os.remove(tmp)
             _fsync_dir(d)
             self._seen = self._stat()
+            try:
+                os.remove(self.path + ".cleared")   # a fresh vault lifetime has begun
+            except OSError:
+                pass
             with open(self.journal_path, "wb") as jf:   # snapshot holds everything now
                 jf.flush()
                 os.fsync(jf.fileno())
@@ -448,6 +472,24 @@ class DurableVault(Vault):
             self._sync_locked()
             self._compact()
 
+    def _tombstone(self, generation: str) -> None:
+        """Record that this vault generation was DELIBERATELY dropped (clear / TTL), so a live
+        process still holding it in memory drops it too instead of writing it back."""
+        try:
+            with open(self.path + ".cleared", "w", encoding="utf-8") as f:
+                f.write(generation or "")
+        except OSError:
+            pass
+
+    def _reset_memory(self, reason: str) -> None:
+        with self._lock:
+            self._real_to_token, self._token_to_real, self._counters = {}, {}, {}
+            self._dirty = False
+            self.generation = ""
+        self._joff = self._jlines = 0
+        self._seen = None
+        self.events.append(reason)
+
     def _delete_file(self) -> None:
         for p in (self.path, self.path + ".bak", self.journal_path):
             try:
@@ -458,13 +500,18 @@ class DurableVault(Vault):
 
     def clear(self) -> None:
         """Drop the mapping and delete the file (call at session/task end)."""
+        old_gen = self.generation
         with self._lock:
             self._real_to_token, self._token_to_real, self._counters = {}, {}, {}
             self._dirty = False
             self.generation = uuid.uuid4().hex
         self._joff = self._jlines = 0
         self._seen = None
-        self._delete_file()
+        if self.memory_only:
+            return
+        with FileLock(self.path + ".lock"):
+            self._delete_file()
+            self._tombstone(old_gen)
 
     # ---------------------------------------------------------------- vault API
     def tokenize(self, real: str, entity_type: str) -> str:
@@ -541,6 +588,10 @@ class DurableVault(Vault):
                             removed += 1
                         except OSError:
                             pass
+                    try:
+                        Path(str(f) + ".cleared").write_text("", encoding="utf-8")
+                    except OSError:
+                        pass
             for f in p.glob("*.json.corrupt-*"):
                 try:
                     if f.stat().st_mtime < cutoff:

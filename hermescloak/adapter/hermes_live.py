@@ -418,7 +418,8 @@ def cloak_restore_normalized(response):
         tol = bool(prof.tolerant_restore)
         rc = _replay() if prof.replay_cache else None
         gen = _generation(vault)
-        surfaces: list[str] = []
+        surfaces: list[str] = []          # prose (tolerant leftover check)
+        arg_surfaces: list[str] = []      # tool args = possibly code (strict brackets only)
         model_texts: list[str] = []
         for attr in ("content", "reasoning"):
             v = getattr(response, attr, None)
@@ -445,14 +446,16 @@ def cloak_restore_normalized(response):
                     fn.arguments = new
                 if rc is not None:
                     rc.remember(new, args, gen)
-            surfaces.append(str(new or ""))
+            arg_surfaces.append(str(new or ""))
         if rc is not None:
             rc.save()
         if prof.audit_new_pii:
             _audit_model_output(eng, model_texts)
         if vault.is_empty():
             return response
-        leftover = sorted({t for s in surfaces for t in leftover_tokens(s, vault, tol)})
+        leftover = sorted({t for s in surfaces for t in leftover_tokens(s, vault, tol)}
+                          | {t for s in arg_surfaces
+                             for t in leftover_tokens(s, vault, "strict" if tol else False)})
         _audit("enforce_restore", json.dumps({"restored": True, "leftover": len(leftover)},
                                               ensure_ascii=False))
         if leftover:

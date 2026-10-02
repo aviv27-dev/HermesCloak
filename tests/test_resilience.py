@@ -501,3 +501,34 @@ def test_replay_cache_merges_across_processes(tmp_path):
     b.save()
     c = ReplayCache(path)
     assert c.lookup("real A", "g") == "tok A" and c.lookup("real B", "g") == "tok B"
+
+
+def test_invalid_key_from_start_gets_private_range_and_generation(tmp_path):
+    p = str(tmp_path / "v.json")
+    d = DurableVault(p)
+    d.tokenize("first", "T")
+    m = DurableVault(p, key="!unreadable")                  # what an unreadable key file yields
+    assert m.memory_only and "vault_key_invalid" in m.events
+    tm = m.tokenize("secret-x", "T")
+    td = d.tokenize("other-y", "T")
+    assert tm != td and m.generation.startswith("mem-") and m.generation != d.generation
+    assert DurableVault(p).restore_token(tm) is None         # disk never maps it to someone else
+
+
+def test_cleared_vault_is_not_resurrected_by_a_live_process(tmp_path):
+    p = str(tmp_path / "v.json")
+    a, b = DurableVault(p), DurableVault(p)
+    a.tokenize("pii@x.com", "T")
+    b.sync()
+    a.clear()                                                # deliberate deletion
+    b.tokenize("new@x.com", "T")                             # B must drop the cleared map
+    assert "vault_cleared_elsewhere" in b.events
+    assert "pii@x.com" not in open(p, encoding="utf-8").read()
+    assert not os.path.exists(p + ".cleared")                # a new lifetime began
+    c = DurableVault(p)                                      # a third, stale process
+    c._real_to_token["stale@x.com"] = "⟦T_77⟧"
+    c._token_to_real["⟦T_77⟧"] = "stale@x.com"
+    c.generation = "old-generation"
+    c._seen = (0, 0, 0)
+    c.sync()
+    assert "vault_generation_changed" in c.events and c.restore_token("⟦T_77⟧") is None

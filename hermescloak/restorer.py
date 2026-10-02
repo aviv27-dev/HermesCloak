@@ -48,7 +48,7 @@ def leftover_tokens(text: str, vault: Vault, tolerant: bool = False) -> list[str
     if tolerant:
         # token type segments are sanitized ("CREDIT_CARD" → "CREDITCARD"): compare like with like
         types = {make_token(t, 0)[1:-3] for t in vault.summary()}
-        for m in _LOOSE_RE.finditer(text):
+        for m in (_LOOSE_STRICT_RE if tolerant == "strict" else _LOOSE_RE).finditer(text):
             canon = make_token(m.group(1).strip(), int(m.group(2)))
             if canon[1:canon.rindex("_")] in types and canon not in out and vault.restore_token(canon) is None:
                 out.append(canon)
