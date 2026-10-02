@@ -16,13 +16,13 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: live-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   live:
     if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'live-test'
+    # job-level: a run skipped for another label never cancels a live run in progress
+    concurrency:
+      group: live-${{ github.ref }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:

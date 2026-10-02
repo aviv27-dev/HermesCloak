@@ -18,13 +18,12 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: telegram-sandbox            # Telegram allows ONE poller per bot
-  cancel-in-progress: true
-
 jobs:
   sandbox:
     if: github.event.label.name == 'live-telegram'
+    concurrency:
+      group: telegram-sandbox          # Telegram allows ONE poller per bot
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     timeout-minutes: 330
     env:
