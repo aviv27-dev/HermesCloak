@@ -1,7 +1,8 @@
 name: Live model check
 
 # Real hermes-agent + HermesCloak against a real model (default Ollama Cloud), synthetic data only.
-# Start it by adding the `live-test` label to a PR, or (once merged to main) from the Actions tab.
+# Start it by adding the `live-test` label to a PR (remove + re-add to run again), or (once merged
+# to main) from the Actions tab.
 # Needs the repository secret OLLAMA_API_KEY (or OLLAMA_TEST_KEY).
 on:
   workflow_dispatch:
@@ -10,7 +11,7 @@ on:
         description: "Model name at the endpoint"
         default: "gpt-oss:120b"
   pull_request:
-    types: [labeled, synchronize]
+    types: [labeled]                # pushes never start (or cancel) a live run
 
 permissions:
   contents: read
@@ -21,7 +22,7 @@ concurrency:
 
 jobs:
   live:
-    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'live-test')
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'live-test'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
