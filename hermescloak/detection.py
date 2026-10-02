@@ -55,6 +55,10 @@ class DetectionEngine:
                 last_end = s.end
         return kept
 
+    def detect_primary(self, text: str) -> list[Span]:
+        """Deterministic + gazetteer only (no NER): cheap enough for per-response audits."""
+        return sorted(self._resolve(self._collect(self._primary, text)), key=lambda s: s.start)
+
     def detect(self, text: str) -> list[Span]:
         kept = self._resolve(self._collect(self._primary, text))
         for s in self._resolve(self._collect(self._secondary, text)):

@@ -18,6 +18,26 @@ _CASE = re.compile(r'(?:פש"?ר|חדל"?פ|הוצל"?פ|ת"?א|ה"?פ|תיק)\s
 _GUSH = re.compile(r"גוש\s*\d+\s*חלקה\s*\d+")
 
 
+# Credentials (API keys, tokens, private keys). High-precision vendor formats only, plus a
+# key=value form whose VALUE (not the key name) is masked. Entity type "סוד" (secret).
+_SECRETS = re.compile(
+    r"-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----[\s\S]{20,}?-----END (?:[A-Z]+ )?PRIVATE KEY-----"
+    r"|\bsk-ant-[A-Za-z0-9_\-]{20,}"
+    r"|\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_\-]{20,}"
+    r"|\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"
+    r"|\bgh[pousr]_[A-Za-z0-9]{36,}\b|\bgithub_pat_[A-Za-z0-9_]{50,}"
+    r"|\bxox[abposr]-[A-Za-z0-9\-]{10,}"
+    r"|\bAIza[0-9A-Za-z_\-]{35}"
+    r"|\b(?:sk|rk)_(?:live|test)_[0-9A-Za-z]{16,}"
+    r"|\b\d{8,10}:AA[A-Za-z0-9_\-]{33}\b"
+    r"|\beyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}"
+)
+_SECRET_ASSIGN = re.compile(
+    r"(?i)\b(?:password|passwd|pwd|secret|api[_\-]?key|access[_\-]?token|auth[_\-]?token|client[_\-]?secret)"
+    r"[\"']?\s*[:=]\s*[\"']?(?P<val>[^\s\"',;⟦⟧]{8,})"
+)
+
+
 # separator-tolerant 9-digit ID/company number ANYWHERE (e.g. "51-073338-1", "310.733.381").
 # No whitespace in the class, so it can't span across unrelated numbers; validated by check-digit.
 _SEP_ID = re.compile(r"(?<![\d.\-/])\d[\d.\-/]{7,12}\d(?![\d.\-/])")
@@ -49,10 +69,18 @@ def _luhn(num: str) -> bool:
 
 class DeterministicRecognizer:
     """Universal/structured PII: IL id (check-digit), phone, email, credit (Luhn),
-    case numbers, gush/helka. Language-independent."""
+    case numbers, gush/helka, credentials. Language-independent."""
+
+    def __init__(self, secrets: bool = True) -> None:
+        self._secrets = secrets
 
     def recognize(self, text: str) -> list[Span]:
         spans: list[Span] = []
+        if self._secrets:
+            for m in _SECRETS.finditer(text):
+                spans.append(Span(m.start(), m.end(), "סוד", m.group(0)))
+            for m in _SECRET_ASSIGN.finditer(text):
+                spans.append(Span(m.start("val"), m.end("val"), "סוד", m.group("val")))
         for m in _EMAIL.finditer(text):
             spans.append(Span(m.start(), m.end(), "מייל", m.group(0)))
         for m in _PHONE.finditer(text):

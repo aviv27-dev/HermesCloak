@@ -52,12 +52,12 @@ _ARGS_DICT_KEYS = frozenset({"input", "arguments", "json", "args"})
 _ESCAPED_TOKEN = re.compile(r"\\u27e6((?:[^\\\"]|\\u[0-9a-fA-F]{4}){1,40}?)\\u27e7", re.IGNORECASE)
 
 
-def _walk(node: Any, fn: TextFn, mode: str) -> Any:
+def _walk(node: Any, fn: TextFn, mode: str, raw_args=None) -> Any:
     """mode: 'struct' (dict keys decide), 'text' (strings are text), 'args' (every leaf)."""
     if isinstance(node, str):
         return fn(node) if mode in ("text", "args") and node else node
     if isinstance(node, list):
-        out = [_walk(x, fn, mode) for x in node]
+        out = [_walk(x, fn, mode, raw_args) for x in node]
         return node if all(a is b for a, b in zip(out, node)) else out
     if isinstance(node, dict):
         if mode == "args":
@@ -70,13 +70,14 @@ def _walk(node: Any, fn: TextFn, mode: str) -> Any:
                 if k in _SKIP_KEYS:
                     out[k] = v
                 elif k == "arguments" and isinstance(v, str):
-                    out[k] = transform_json_string(v, fn)
+                    whole = raw_args(v) if raw_args is not None else None
+                    out[k] = whole if whole is not None else transform_json_string(v, fn)
                 elif k in _ARGS_DICT_KEYS and isinstance(v, dict):
                     out[k] = _walk(v, fn, "args")
                 elif k in _TEXT_KEYS and isinstance(v, str):
                     out[k] = fn(v) if v else v
                 elif isinstance(v, (dict, list)):
-                    out[k] = _walk(v, fn, "text" if k in _TEXT_KEYS or k == "input" else "struct")
+                    out[k] = _walk(v, fn, "text" if k in _TEXT_KEYS or k == "input" else "struct", raw_args)
                 else:
                     out[k] = v
         return node if all(out[k] is node[k] for k in node) else out
@@ -100,9 +101,10 @@ def transform_json_string(raw: str, fn: TextFn) -> str:
     return json.dumps(new, ensure_ascii=False)
 
 
-def transform_request(request: dict, fn: TextFn) -> dict:
+def transform_request(request: dict, fn: TextFn, raw_args=None) -> dict:
     """Return a shallow copy of a provider request with ``fn`` applied to its text.
-    Containers that did not change are shared, not copied."""
+    Containers that did not change are shared, not copied. ``raw_args(s)`` may return a
+    replacement for a whole tool-arguments JSON string (replay) or None to walk it."""
     out = dict(request)
     for key in REQUEST_TEXT_KEYS:
         if key not in out:
@@ -111,7 +113,7 @@ def transform_request(request: dict, fn: TextFn) -> dict:
         if isinstance(v, str):
             out[key] = fn(v) if v else v
         elif isinstance(v, (list, dict)):
-            out[key] = _walk(v, fn, "text")
+            out[key] = _walk(v, fn, "text", raw_args)
     return out
 
 

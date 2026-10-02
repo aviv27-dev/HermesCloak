@@ -35,7 +35,17 @@ $HERMES_HOME/cloak/
   profile.yaml    # copy of profiles/example.yaml, adapted   (never_mask, fail_mode, token_instruction)
   gazetteer.txt   # optional: known names, one "surface<TAB>type" per line (e.g. client list)
   ner_url         # optional: URL of the Hebrew NER microservice (see hermescloak/service/ner_service.py)
+  vault_key_file  # optional: PATH of a Fernet key file → vault encrypted at rest (see below)
+  vault_mode      # optional: "memory" = never persist the token map (rollback switch)
+  # written by HermesCloak:
+  vaults/         # the per-agent token map: <id>.json snapshot + .journal + .bak  (0600, TTL)
+  replay.json     # replay cache: hash(restored text) → the model's own tokenized text
+  audit.log       # JSONL events, counts/types only — never real values (rotates at 5 MB × 3)
 ```
+
+Edits to `profile.yaml`, `gazetteer.txt` and `ner_url` apply **live** to running sessions. A broken
+edit never switches filtering off: the last good version keeps being used and `config_error` is
+audited.
 
 - **`off`** (or dir absent) → passthrough, zero behaviour change.
 - **`shadow`** → run detection and audit *counts/types only* (never real PII), but send the
@@ -68,13 +78,40 @@ The plugin writes `plugin_active` to the audit log on load, listing each point; 
 update ever removes one, it is reported as **`seam_missing`** (and logged as a warning) instead of
 silently reducing coverage.
 
-## 4. Verify it's live and healthy
+## 4. Reliability — what survives what
+
+| Failure | Behaviour |
+|---------|-----------|
+| gateway restart / crash / `kill -9` mid-write | every new mapping is fsync'd to the vault journal **before** its token is used; a torn last line is skipped; snapshot written twice (main + `.bak`) atomically. Verified by a chaos test (4 processes, random SIGKILL, ~28k tokens: 0 lost, 0 reused). |
+| several processes on one HERMES_HOME (gateway + cron + CLI + subagents) | minting and every disk read happen under an exclusive file lock; a token minted elsewhere is picked up on demand — never the same token for two values |
+| vault file corrupted | quarantined as `.corrupt-<ts>`, `.bak` loaded instead (`vault_corrupt_quarantined`, `vault_restored_from_backup`) |
+| encrypted vault, key missing/wrong | vault goes memory-only and **never overwrites** the encrypted file (`vault_locked`) |
+| broken `profile.yaml` / unreadable `gazetteer.txt` | last good version kept (`config_error`) |
+| NER service hung or down | circuit breaker: one timeout, then NER is skipped for 30 s (`ner_down` / `ner_up`) instead of a timeout per message |
+| internal filter error | `fail_mode: open` → original sent + `unfiltered_sent`; `fail_mode: closed` → text withheld + `blocked_send` |
+| hermes update moves an interception point | `seam_missing` at load + warning; two official-API backstops still restore tool arguments (`tool_request` middleware) and the final reply (`transform_llm_output`) |
+| concurrent sessions in one process | the vault is thread-safe (one token per value, ever) |
+| long-running gateway | engines, content caches and the replay cache are bounded LRUs; audit log rotates |
+
+### Encryption at rest
+
+```bash
+python -c "from hermescloak.durable_vault import generate_key; print(generate_key())" > /secure/place/cloak.key
+chmod 600 /secure/place/cloak.key
+echo /secure/place/cloak.key > $HERMES_HOME/cloak/vault_key_file      # or env HERMESCLOAK_VAULT_KEY_FILE
+pip install 'hermescloak[crypto]'                                      # the cryptography package
+```
+
+Keep the key **outside** the cloak dir (it protects a copied/backed-up disk, not a compromised
+running process). Egress scripts read the same key setting.
+
+## 5. Verify it's live and healthy
 
 The adapter writes an audit log (event kinds, counts, entity types — **never real PII**):
 
 ```bash
 tail $HERMES_HOME/cloak/audit.log
-# plugin_active → which interception points are live on this hermes version
+# plugin_active → which interception points are live on this hermes version (+ self_test)
 # enforce_send  → "real_values_in_outbound": 0   (no detected value reached the cloud)
 # enforce_restore → "leftover": 0                (every token restored; >0 is the fail-safe signal)
 ```
@@ -82,6 +119,21 @@ tail $HERMES_HOME/cloak/audit.log
 `real_values_in_outbound` counts *detected* values that survived into the cloud-bound copy — it
 should always be `0`. A non-empty `leftover` means a token reached the reply unrestored (the
 fail-safe alarm — investigate).
+
+| Event | Meaning |
+|-------|---------|
+| `plugin_active` | plugin loaded: per-interception-point status + `self_test` |
+| `enforce_send` | a request was tokenized: entity counts, `real_values_in_outbound` (must be 0), `replayed` |
+| `enforce_restore` | a reply was restored; `leftover` > 0 = alarm |
+| `leftover_token` | which token(s) could not be restored |
+| `leaked_original` | the model wrote a value we had masked — it saw it via some unmasked path: **investigate** |
+| `new_pii` | PII-shaped values the model introduced itself (counts per type) |
+| `backstop_restore` | a backstop caught a token the primary restore missed (should be rare) |
+| `unfiltered_sent` / `blocked_send` | an internal error; sent unfiltered (fail-open) / withheld (fail-closed) |
+| `seam_missing`, `config_error`, `ner_down`, `vault_*` | see the reliability table above |
+
+`python install/apply_hooks.py --verify --strict` summarizes all of this (vault health, last plugin
+load, incidents in the last 24 h) and exits non-zero on any incident — wire it to cron/monitoring.
 
 For an end-to-end proof on your hermes version (a real agent turn against a local fake
 "cloud" that records what it receives; uses a throwaway HERMES_HOME):
@@ -97,8 +149,6 @@ For an end-to-end proof on your hermes version (a real agent turn against a loca
 - **Mixture-of-Agents prepared requests** and **streaming auxiliary calls** bypass the funnels above.
 - Codex `provider_data` replay items (e.g. `codex_message_items`) keep the model's tokenized text;
   they are replayed to the model as-is (consistent, since the vault is durable) but are stored with tokens.
-- One vault per agent and process: separate processes (gateway + cron + CLI) on one HERMES_HOME
-  each keep their own in-memory map and the last writer's file wins — run sensitive work in one process.
 
 ## Why in-process, not a proxy
 

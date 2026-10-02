@@ -83,6 +83,9 @@ class _Ctx:
     def register_middleware(self, kind, cb):
         self.middleware.setdefault(kind, []).append(cb)
 
+    def register_hook(self, name, cb):
+        self.middleware.setdefault("hook:" + name, []).append(cb)
+
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
@@ -226,3 +229,19 @@ def test_missing_hermes_target_is_reported_not_raised(tmp_path, monkeypatch):
     plugin.register(_Ctx())
     assert plugin.status()["auxiliary"].startswith("missing")
     assert "seam_missing" in (tmp_path / "cloak" / "audit.log").read_text(encoding="utf-8")
+
+
+def test_backstops_registered_and_restore(env):
+    plugin, ctx, _, cloak = env
+    _send(ctx, {"messages": [{"role": "user", "content": "שירה לוי 050-1234567"}]})
+    (tool_mw,) = ctx.middleware["tool_request"]
+    res = tool_mw(tool_name="send_message", args={"to": "⟦טלפון_1⟧", "n": [{"who": "[לקוח_1]"}]},
+                  original_args={}, session_id="s1")
+    assert res["args"] == {"to": "050-1234567", "n": [{"who": "שירה לוי"}]}
+    assert tool_mw(tool_name="x", args={"a": "plain"}) is None            # untouched → None
+    (hook,) = ctx.middleware["hook:transform_llm_output"]
+    assert hook(response_text="done for ⟦לקוח_1⟧", session_id="s1") == "done for שירה לוי"
+    assert hook(response_text="nothing to do", session_id="s1") is None
+    st = plugin.status()
+    log = (cloak / "audit.log").read_text(encoding="utf-8")
+    assert "backstop_restore" in log and '\\"self_test\\": \\"ok\\"' in log

@@ -59,7 +59,9 @@ if report.leftover:                               # fail-safe signal (see "Hones
 ## Detection
 
 - **Deterministic (language-independent):** Israeli national ID (*Teudat Zehut*, with check-digit),
-  phone, email, credit card (Luhn), case/docket numbers, land-registry parcel (*Gush*/*Helka*).
+  phone, email, credit card (Luhn), case/docket numbers, land-registry parcel (*Gush*/*Helka*),
+  and credentials (OpenAI/Anthropic/AWS/GitHub/Slack/Google/Stripe/Telegram keys, JWTs, private
+  keys, `password=…` values).
 - **Gazetteer:** order-independent (surname-first vs given-first) + proclitic-aware (handles glued
   one-letter Hebrew prefixes, e.g. *ל/ב/ו* attached to a name). Fed by a pluggable `EntitySource`
   (file / callable / your own DB adapter).
@@ -94,6 +96,14 @@ python install/apply_hooks.py --verify --hermes-root /path/to/hermes-agent
   an optional system-prompt note so the agent doesn't defeat or exfiltrate around the filter.
 - **[docs/UPGRADING.md](docs/UPGRADING.md)** — what to check after a hermes update, and migrating from
   the old source-patch install (which current hermes-agent no longer supports).
+- **[docs/LIVE-TESTING.md](docs/LIVE-TESTING.md)** — an acceptance protocol (synthetic data) for a
+  running agent: shadow → enforce → tools → replay → secrets → health.
+
+Built to survive failures: a crash-safe, cross-process token vault (write-ahead journal, locked
+minting, backups, optional encryption at rest), self-healing config, a NER circuit breaker,
+byte-identical replay of the model's own turns, tolerant restore of mangled tokens, an output
+audit for PII the model introduced, and official-API backstops — see
+[INTEGRATION.md § Reliability](docs/INTEGRATION.md#4-reliability--what-survives-what).
 
 ## Try it — browser demo
 

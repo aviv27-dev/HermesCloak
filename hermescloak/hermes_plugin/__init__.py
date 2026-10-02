@@ -32,6 +32,7 @@ import inspect
 import json
 import logging
 import threading
+from types import SimpleNamespace
 
 logger = logging.getLogger("hermescloak")
 
@@ -55,6 +56,34 @@ def llm_request_middleware(request=None, session_id="", api_mode="", **_kw):
     if new is request:
         return None
     return {"request": new, "source": "hermescloak", "reason": "pii-pseudonymization"}
+
+
+# ---------------------------------------------------------------- backstops (official APIs)
+# Defense in depth: if a hermes refactor ever breaks the normalize_response wrap, these two
+# official extension points still keep tokens out of executed tool calls and the final reply.
+# Both are idempotent with the primary restore (restoring real text is a no-op).
+
+def tool_request_middleware(tool_name=None, args=None, **_kw):
+    """hermes ``tool_request`` middleware: real values in tool args before guardrails,
+    approvals and execution see them."""
+    if not isinstance(args, dict):
+        return None
+    new = _live().cloak_restore_args_dict(args)
+    if new is args or new == args:
+        return None
+    _live()._audit("backstop_restore", json.dumps({"where": "tool_request", "tool": str(tool_name)}))
+    return {"args": new, "source": "hermescloak", "reason": "restore-tokens"}
+
+
+def transform_llm_output_hook(response_text=None, **_kw):
+    """hermes ``transform_llm_output`` hook: restore the final reply text (None = unchanged)."""
+    if not isinstance(response_text, str):
+        return None
+    new = _live().cloak_restore_text_for(SimpleNamespace(session_id=_kw.get("session_id")), response_text)
+    if new == response_text:
+        return None
+    _live()._audit("backstop_restore", json.dumps({"where": "transform_llm_output"}))
+    return new
 
 
 # ---------------------------------------------------------------- inbound (transports)
@@ -227,8 +256,17 @@ def register(ctx) -> None:
     ctx.register_middleware("llm_request", llm_request_middleware)
     st = install_runtime_patches()
     st["outbound"] = "ok: llm_request middleware"
-    missing = {k: v for k, v in st.items() if not v.startswith("ok")}
+    for label, fn in (("backstop_tools", lambda: ctx.register_middleware("tool_request", tool_request_middleware)),
+                      ("backstop_reply", lambda: ctx.register_hook("transform_llm_output", transform_llm_output_hook))):
+        try:
+            fn()
+            st[label] = "ok"
+        except Exception as exc:  # noqa: BLE001
+            st[label] = f"error: {exc!r}"
     live = _live()
+    ok, why = live.self_test()
+    st["self_test"] = "ok" if ok else f"error: {why}"
+    missing = {k: v for k, v in st.items() if not v.startswith("ok")}
     live._audit("plugin_active", json.dumps({"mode": live.mode(), "patches": st}, ensure_ascii=False))
     if missing:
         live._audit("seam_missing", json.dumps(missing, ensure_ascii=False))

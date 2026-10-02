@@ -27,7 +27,7 @@ class Engine:
         self.profile = profile
         # inject a DurableVault to persist the map across restarts; defaults to in-memory.
         self.vault = vault if vault is not None else Vault()
-        recognizers: list = [DeterministicRecognizer()]
+        recognizers: list = [DeterministicRecognizer(secrets=getattr(profile, "detect_secrets", True))]
         if entity_source is not None:
             recognizers.append(GazetteerRecognizer(entity_source))
         # NER (extra) is SECONDARY — yields to deterministic/gazetteer spans on overlap so

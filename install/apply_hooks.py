@@ -21,8 +21,11 @@ Usage:
           as MISSING instead of silently reducing coverage.
 """
 import argparse
+import glob
+import json
 import os
 import re
+import time
 import shutil
 import subprocess
 import sys
@@ -128,7 +131,67 @@ def _read(path):
         return f.read()
 
 
-def verify(root):
+INCIDENTS = ("seam_missing", "unfiltered_sent", "blocked_send", "leftover_token", "restore_error",
+             "leaked_original", "config_error", "vault_locked", "vault_key_invalid", "vault_key_unreadable",
+             "vault_crypto_unavailable", "vault_write_failed", "vault_corrupt_quarantined",
+             "vault_lock_timeout", "vault_error", "ner_down")
+INFO = ("new_pii", "backstop_restore", "vault_restored_from_backup", "vault_journal_lines_skipped")
+
+
+def _ts(rec):
+    try:
+        return time.mktime(time.strptime(rec["ts"][:19], "%Y-%m-%dT%H:%M:%S"))
+    except Exception:
+        return None
+
+
+def audit_summary(hours=24.0):
+    """(last plugin_active record, {kind: count} within `hours`) from the audit log (+ rotations)."""
+    cloak = os.path.join(hermes_home(), "cloak")
+    files = sorted(glob.glob(os.path.join(cloak, "audit.log*")), reverse=True)
+    last_active, counts = None, {}
+    cutoff = time.time() - hours * 3600
+    for f in files:
+        try:
+            lines = open(f, encoding="utf-8").read().splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if rec.get("kind") == "plugin_active":
+                last_active = rec
+            t = _ts(rec)
+            if t is not None and t >= cutoff:
+                counts[rec.get("kind")] = counts.get(rec.get("kind"), 0) + 1
+    return last_active, counts
+
+
+def vault_status():
+    out = []
+    try:
+        from hermescloak.durable_vault import MAGIC, read_journal, read_payload
+        from hermescloak.adapter.hermes_live import _vault_key
+    except Exception as exc:
+        return [f"cannot inspect vault ({exc!r})"]
+    os.environ.setdefault("HERMES_HOME", hermes_home())
+    key = _vault_key()
+    for f in sorted(glob.glob(os.path.join(hermes_home(), "cloak", "vaults", "*.json"))):
+        enc = open(f, "rb").read(len(MAGIC)) == MAGIC
+        try:
+            n = len(read_payload(f, key).get("token_to_real") or {})
+            j = len(read_journal(f + ".journal", key)[0])
+            out.append(f"{os.path.basename(f)}: {n} snapshot + {j} journal entries, "
+                       f"{'ENCRYPTED' if enc else 'plaintext (0600)'}")
+        except Exception as exc:
+            out.append(f"{os.path.basename(f)}: UNREADABLE ({type(exc).__name__}) "
+                       f"{'— encrypted, key not available here' if enc else ''}")
+    return out or ["no vault yet (created on the first tokenized value)"]
+
+
+def verify(root, strict=False):
     ok = True
     print(f"HERMES_HOME: {hermes_home()}\n--- HermesCloak verification ---")
     en, dis = _plugin_lists(_load_config())
@@ -162,6 +225,30 @@ def verify(root):
                   "(restore is idempotent) and removed by the next hermes update")
     elif root:
         print(f"  [info] hermes root {root} not found — skipped the interception-point check")
+    print("--- vault ---")
+    for line in vault_status():
+        print(f"  {line}")
+    last, counts = audit_summary()
+    print("--- audit (last 24h) ---")
+    if last is None:
+        print("  [info] no plugin_active yet — restart the gateway after enabling, then run a turn")
+    else:
+        try:
+            patches = json.loads(last.get("detail") or "{}").get("patches", {})
+        except ValueError:
+            patches = {}
+        bad = {k: v for k, v in patches.items() if not str(v).startswith("ok")}
+        print(f"  [{'OK ' if not bad else 'MISSING'}] last plugin load {last.get('ts', '?')}: "
+              + ("all interception points + self-test ok" if not bad else json.dumps(bad)))
+        ok &= not bad
+    inc = {k: counts[k] for k in INCIDENTS if counts.get(k)}
+    for k in INFO:
+        if counts.get(k):
+            print(f"  [info] {k}: {counts[k]}")
+    for k, n in inc.items():
+        print(f"  [WARN] {k}: {n}")
+    if strict and inc:
+        ok = False
     print("--- " + ("protected ✓ (confirm on a live turn: plugin_active + enforce_send in "
                     "$HERMES_HOME/cloak/audit.log)" if ok else "NOT PROTECTED — see MISSING above") + " ---")
     return ok
@@ -174,13 +261,14 @@ def main():
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--print", dest="show", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--strict", action="store_true", help="also fail on audit incidents in the last 24h")
     a = ap.parse_args()
     if a.show:
         print(__doc__)
         return 0
     if a.apply:
         return apply(a.dry_run)
-    return 0 if verify(hermes_root(a.hermes_root)) else 1
+    return 0 if verify(hermes_root(a.hermes_root), a.strict) else 1
 
 
 if __name__ == "__main__":
