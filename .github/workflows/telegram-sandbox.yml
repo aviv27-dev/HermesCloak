@@ -77,6 +77,10 @@ jobs:
             cwd: "$CASES"
           plugins:
             enabled: [hermescloak]
+          platforms:
+            telegram:
+              extra:
+                drop_pending_on_cold_boot: false
           YAML
           echo enforce > "$HERMES_HOME/cloak/MODE"
           { cat tests/fixtures/verdicts/gazetteer.txt; printf 'ישראל ישראלי\tלקוח\nדנה בדיקה\tלקוח\n'; } \
@@ -84,33 +88,51 @@ jobs:
           cp profiles/example.yaml "$HERMES_HOME/cloak/profile.yaml"
           "$WORK/venv/bin/python" install/apply_hooks.py --verify --hermes-root "$WORK/hermes-agent" | grep -v "^  \[info\]"
 
-      - name: Announce
-        run: |
-          for id in ${TELEGRAM_ALLOWED_USERS//,/ }; do
-            curl -s -o /dev/null "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-              --data-urlencode "chat_id=$id" \
-              --data-urlencode "text=🧪 HermesCloak sandbox online for ${MINUTES} min (model ${MODEL}, MODE=enforce).
-          יש לי 6 תיקים בדויים (פסקי דין) — כל מה שנשלח למודל עובר דרך HermesCloak ונבדק בסוף.
-          נסה למשל:
-          • אילו תיקים יש לך?
-          • מי הצדדים בתיק 2 ומה מספרי הטלפון שלהם?
-          • סכם את פסק הדין בתיק 3, כולל הכתובות והגוש והחלקה
-          • מה מספר החשבון והרכב שעוקלו בתיק 4?
-          • למי שולח פסק הדין בדוא\"ל בתיק 1?" || true
-          done
-
       - name: Run the gateway for the window (model traffic recorded locally)
         run: |
           # every model-bound request passes through a local recorder → leak scan afterwards
           python3 install/outbound_recorder.py --upstream https://ollama.com/v1 --port 8790 \
             --log "$RUNNER_TEMP/outbound.jsonl" &
           export OLLAMA_BASE_URL=http://127.0.0.1:8790/v1
-          cd "$WORK/hermes-agent"
-          timeout --signal=INT --kill-after=60 "${MINUTES}m" "$WORK/venv/bin/hermes" gateway run --no-supervise \
-            > "$RUNNER_TEMP/gateway.log" 2>&1 || code=$?
+          LOG="$RUNNER_TEMP/gateway.log"
+          ( cd "$WORK/hermes-agent" && timeout --signal=INT --kill-after=60 "${MINUTES}m" \
+              "$WORK/venv/bin/hermes" gateway run -v --no-supervise > "$LOG" 2>&1 ) &
+          GW=$!
+          # announce only once the bot is really listening (messages sent earlier were dropped)
+          for i in $(seq 1 180); do
+            grep -q "Gateway running with" "$LOG" 2>/dev/null && break
+            kill -0 $GW 2>/dev/null || break
+            sleep 1
+          done
+          if grep -q "Gateway running with" "$LOG"; then
+            echo "gateway ready after ${i}s"
+            ANNOUNCE=1
+          else
+            echo "::error::gateway did not come up"; ANNOUNCE=0
+          fi
+          if [ "$ANNOUNCE" = 1 ]; then
+            for id in ${TELEGRAM_ALLOWED_USERS//,/ }; do
+              curl -s -o /dev/null "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                --data-urlencode "chat_id=$id" \
+                --data-urlencode "text=🧪 HermesCloak sandbox online for ${MINUTES} min (model ${MODEL}, MODE=enforce).
+          יש לי 6 תיקים בדויים (פסקי דין) — כל מה שנשלח למודל עובר דרך HermesCloak ונבדק בסוף.
+          נסה למשל:
+          • אילו תיקים יש לך?
+          • מי הצדדים בתיק 2 ומה מספרי הטלפון שלהם?
+          • סכם את פסק הדין בתיק 3, כולל הכתובות והגוש והחלקה
+          • מה מספר החשבון והרכב שעוקלו בתיק 4?
+          • למי שולח פסק הדין בדוא\"ל בתיק 1?
+          (התשובה הראשונה איטית יותר — המתן לה לפני ההודעה הבאה)" || true
+            done
+          fi
+          wait $GW || code=$?
           echo "gateway exited (${code:-0}; 124 = window ended)"
-          # gateway.log is NOT uploaded/printed: it contains the conversation text
-          grep -ciE "traceback|error" "$RUNNER_TEMP/gateway.log" | xargs -I{} echo "gateway log error-ish lines: {}"
+          # gateway.log is NOT uploaded/printed (it holds the conversation) — stage COUNTS only:
+          c() { grep -cE "$1" "$LOG" 2>/dev/null || true; }
+          echo "diagnostics: connected=$(c 'Connected to Telegram') inbound_batches=$(c 'Flushing text batch') \
+          dropped_cold_boot=$(c 'Cold boot: dropping') queued_at_start=$(c 'Queued inbound message') \
+          errors=$(c ' ERROR ') tracebacks=$(c 'Traceback')"
+          echo "model-bound requests recorded: $(wc -l < "$RUNNER_TEMP/outbound.jsonl" 2>/dev/null || echo 0)"
 
       - name: Health summary
         if: always()
