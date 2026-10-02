@@ -377,7 +377,7 @@ def _restore_args_string(raw, vault, tolerant=False):
 
 
 def _audit_model_output(eng: Engine, model_texts: list[str]) -> None:
-    """veil-style output audit on what the MODEL wrote (pre-restore), counts/types only:
+    """Output audit on what the MODEL wrote (pre-restore), counts/types only:
       leaked_original → a real value the vault masked appears verbatim: the model saw it some
                         other way (an unmasked path) — investigate.
       new_pii         → PII-shaped values the model introduced (invented or echoed)."""
