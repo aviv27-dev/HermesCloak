@@ -33,7 +33,7 @@ def main():
                     help="read the sandbox vault to tell 'sent as a token' from 'never sent'")
     a = ap.parse_args()
     manifest = json.load(open(a.manifest, encoding="utf-8"))
-    texts, n = [], 0
+    texts, n, turns = [], 0, 0
     try:
         for line in open(a.log, encoding="utf-8"):
             line = line.strip()
@@ -41,7 +41,9 @@ def main():
                 continue
             n += 1
             try:
-                _strings(json.loads(line), texts)
+                obj = json.loads(line)
+                turns += isinstance(obj, dict) and bool(obj.get("messages") or obj.get("input"))
+                _strings(obj, texts)
             except ValueError:
                 texts.append(line)
     except OSError:
@@ -67,7 +69,11 @@ def main():
         tok = real_to_token.get(m["value"])
         row["token"] += bool(tok and tok in blob and not clear)
     tokens = blob.count("⟦")
-    print(f"scanned {n} model-bound requests; {tokens} token(s) seen")
+    print(f"scanned {n} model-bound requests ({turns} carrying a conversation); {tokens} token(s) seen")
+    if not turns:
+        print("NOTHING TO VERIFY — no conversation reached the model in this window (no chat, or the "
+              "messages never reached the agent)")
+        return 3
     print(f"  {'type':30} {'expected':8} {'as token':>9} {'in clear':>9} / values")
     leaks = 0
     for typ, r in sorted(per.items(), key=lambda kv: (kv[1]["expected"] != "masked", kv[0])):
