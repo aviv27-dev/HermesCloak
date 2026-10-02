@@ -30,6 +30,7 @@ import base64
 import hashlib
 import json
 import os
+import random
 import tempfile
 import time
 import uuid
@@ -95,11 +96,30 @@ def _decrypt_line(key, line: bytes) -> dict:
     if line.startswith(b"E:"):
         if not key:
             raise VaultLocked("journal")
-        line = _fernet(key).decrypt(line[2:])
+        try:
+            line = _fernet(key).decrypt(line[2:])
+        except ImportError as exc:
+            raise VaultLocked("journal: cryptography not installed") from exc
+        except Exception as exc:          # wrong key: NEVER treat as a skippable bad line
+            raise VaultLocked("journal: cannot decrypt") from exc
     obj = json.loads(line.decode("utf-8"))
     if not isinstance(obj, dict) or "t" not in obj or "r" not in obj:
         raise ValueError("bad journal entry")
     return obj
+
+
+def _fsync_dir(d: str) -> None:
+    """Make renames/truncations durable across power loss (POSIX; no-op elsewhere)."""
+    if os.name == "nt":
+        return
+    try:
+        fd = os.open(d or ".", os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
 
 
 def _last_byte(fd: int, path: str, size: int) -> bytes:
@@ -146,6 +166,7 @@ class DurableVault(Vault):
         self._joff = 0                         # bytes of the journal already merged
         self._jlines = 0                       # journal entries since the last compaction
         self._last_sync = 0.0
+        self._last_touch = 0.0
         self.generation: str = ""
         self.memory_only = False               # set when the file cannot be safely written
         self.conflicts = 0                     # token clashes found while merging other writers
@@ -175,7 +196,7 @@ class DurableVault(Vault):
     def _stat_of(path):
         try:
             st = os.stat(path)
-            return (st.st_mtime_ns, st.st_size)
+            return (st.st_mtime_ns, st.st_size, st.st_ino)
         except OSError:
             return None
 
@@ -198,14 +219,17 @@ class DurableVault(Vault):
         if self.ttl_seconds and last is not None and (_now() - last) > self.ttl_seconds:
             self._delete_file()                  # expired → start fresh (new generation)
             return
+        locked_main = False
         for candidate in (self.path, self.path + ".bak"):
             if not os.path.exists(candidate):
                 continue
             try:
                 data = read_payload(candidate, self._key)
             except VaultLocked:
-                self.memory_only = True          # never overwrite what we cannot read
-                self.events.append("vault_locked")
+                if candidate == self.path and self._key and os.path.exists(self.path + ".bak"):
+                    locked_main = True           # wrong key OR corrupt ciphertext: ask the backup
+                    continue
+                self._go_memory_only()           # never overwrite what we cannot read
                 return
             except Exception:
                 if candidate == self.path:       # quarantine, then try the backup
@@ -215,19 +239,42 @@ class DurableVault(Vault):
                         pass
                     self.events.append("vault_corrupt_quarantined")
                 continue
+            if locked_main:                       # the backup decrypts → the main copy is corrupt
+                try:
+                    os.replace(self.path, f"{self.path}.corrupt-{int(_now())}")
+                except OSError:
+                    pass
+                self.events.append("vault_corrupt_quarantined")
             self._merge(data.get("token_to_real") or {}, data.get("counters") or {}, data.get("generation"))
             if candidate != self.path:
                 self.events.append("vault_restored_from_backup")
             self._seen = self._stat()
             break
+        else:
+            if locked_main:                       # neither copy decrypts: wrong key
+                self._go_memory_only()
+                return
         try:
             self._read_journal()
         except VaultLocked:
-            self.memory_only = True
-            self.events.append("vault_locked")
+            self._go_memory_only()
             return
         if "vault_restored_from_backup" in self.events and not self.memory_only:
             self._compact()                      # re-establish the main file (lock already held)
+
+    def _go_memory_only(self) -> None:
+        """Stop touching disk (we cannot read what is there, so we must never write over it) and
+        mint from a far-away random number range so our tokens cannot collide with the ones the
+        processes that CAN read the file are issuing."""
+        if self.memory_only:
+            return
+        self.memory_only = True
+        self.events.append("vault_locked")
+        with self._lock:
+            base = random.randrange(500_000, 990_000)
+            for k in list(self._counters) or []:
+                self._counters[k] = max(self._counters[k], base)
+            self._memory_base = base
 
     def _merge(self, t2r: dict, counters: dict | None = None, generation=None) -> None:
         """Adopt another writer's mappings without ever breaking our own."""
@@ -268,25 +315,48 @@ class DurableVault(Vault):
     def _sync_locked(self, force: bool = False) -> bool:
         changed = False
         st = self._stat()
+        if st is None and self._seen is not None and not self.is_empty():
+            # our snapshot vanished under us (swept / deleted by hand): re-establish it from
+            # memory rather than let another process start numbering from scratch
+            self.events.append("vault_resurrected")
+            self._dirty = True
+            self._compact()
+            return True
         if st is not None and (st != self._seen or force):
+            self._joff = 0                        # a new snapshot comes with a fresh journal
             try:
                 data = read_payload(self.path, self._key)
                 self._merge(data.get("token_to_real") or {}, data.get("counters") or {},
                             data.get("generation"))
                 self._seen = st
-                self._joff = 0                    # a new snapshot came with a fresh journal
                 changed = True
+            except VaultLocked:
+                self._go_memory_only()
+                return changed
             except Exception:
-                pass
+                self.events.append("vault_snapshot_unreadable")   # journal re-read from 0 below
         jst = self._stat_of(self.journal_path)
         if jst is not None and jst[1] != self._joff:
             before = len(self._token_to_real)
             try:
                 self._read_journal()
             except VaultLocked:
+                self._go_memory_only()
                 return changed
             changed = changed or len(self._token_to_real) != before
         return changed
+
+    def _touch(self) -> None:
+        """Mark the vault as IN USE (TTL counts from last use, not last new value), at most
+        every 5 minutes. Without this a busy gateway that only reuses known values let the
+        file 'expire' and another process swept it and restarted the numbering."""
+        if self.memory_only or _now() - self._last_touch < 300:
+            return
+        self._last_touch = _now()
+        try:
+            os.utime(self.path)
+        except OSError:
+            pass
 
     # ---------------------------------------------------------------- writing
     def _payload_bytes(self) -> bytes:
@@ -331,9 +401,11 @@ class DurableVault(Vault):
                 finally:
                     if os.path.exists(tmp):
                         os.remove(tmp)
+            _fsync_dir(d)
             self._seen = self._stat()
-            with open(self.journal_path, "wb"):   # snapshot holds everything now
-                pass
+            with open(self.journal_path, "wb") as jf:   # snapshot holds everything now
+                jf.flush()
+                os.fsync(jf.fileno())
             self._joff = 0
             self._jlines = 0
         except Exception:
@@ -399,14 +471,21 @@ class DurableVault(Vault):
         with self._lock:
             existing = self._real_to_token.get(real)
         if existing is not None:
+            self._touch()
             return existing
         if self.memory_only:
+            base = getattr(self, "_memory_base", None)
+            if base is not None:
+                with self._lock:
+                    self._counters[entity_type] = max(self._counters.get(entity_type, 0), base)
             return super().tokenize(real, entity_type)
         # new value: mint under the cross-process lock against the freshest state, write through
         with FileLock(self.path + ".lock") as fl:
             if not fl.acquired:
                 self.events.append("vault_lock_timeout")   # proceeding unlocked: audit it
             self._sync_locked()
+            if self.memory_only:                  # sync just found data we cannot read
+                return super().tokenize(real, entity_type)
             with self._lock:
                 before = len(self._token_to_real)
                 token = super().tokenize(real, entity_type)
@@ -418,6 +497,8 @@ class DurableVault(Vault):
 
     def restore_token(self, token: str) -> str | None:
         real = super().restore_token(token)
+        if real is not None:
+            self._touch()
         if real is None and not self.memory_only and _now() - self._last_sync > 0.5:
             self._last_sync = _now()               # maybe another process minted it
             if self.sync():
@@ -442,9 +523,18 @@ class DurableVault(Vault):
             cutoff = _now() - ttl_seconds
             for f in p.glob("*.json"):
                 group = [f, Path(str(f) + ".journal"), Path(str(f) + ".bak")]
-                times = [g.stat().st_mtime for g in group[:2]
-                         if g.exists() and (g == f or g.stat().st_size > 0)]
-                if times and max(times) < cutoff:
+
+                def _times():
+                    return [g.stat().st_mtime for g in group[:2]
+                            if g.exists() and (g == f or g.stat().st_size > 0)]
+
+                times = _times()
+                if not (times and max(times) < cutoff):
+                    continue
+                with FileLock(str(f) + ".lock") as fl:   # re-check: a live writer may be mid-use
+                    times = _times()
+                    if not fl.acquired or not (times and max(times) < cutoff):
+                        continue
                     for g in group:
                         try:
                             g.unlink()

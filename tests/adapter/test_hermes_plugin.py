@@ -235,9 +235,11 @@ def test_backstops_registered_and_restore(env):
     plugin, ctx, _, cloak = env
     _send(ctx, {"messages": [{"role": "user", "content": "שירה לוי 050-1234567"}]})
     (tool_mw,) = ctx.middleware["tool_request"]
-    res = tool_mw(tool_name="send_message", args={"to": "⟦טלפון_1⟧", "n": [{"who": "[לקוח_1]"}]},
+    res = tool_mw(tool_name="send_message",
+                  args={"to": "⟦טלפון_1⟧", "n": [{"who": "⟨לקוח_1⟩"}], "code": "x = arr[לקוח_1]"},
                   original_args={}, session_id="s1")
-    assert res["args"] == {"to": "050-1234567", "n": [{"who": "שירה לוי"}]}
+    # tool args can be code: unambiguous brackets are restored tolerantly, [..] is left alone
+    assert res["args"] == {"to": "050-1234567", "n": [{"who": "שירה לוי"}], "code": "x = arr[לקוח_1]"}
     assert tool_mw(tool_name="x", args={"a": "plain"}) is None            # untouched → None
     (hook,) = ctx.middleware["hook:transform_llm_output"]
     assert hook(response_text="done for ⟦לקוח_1⟧", session_id="s1") == "done for שירה לוי"

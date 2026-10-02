@@ -85,10 +85,13 @@ def _audit(kind: str, detail: str, *, every: float = 0.0) -> None:
         path = str(_cloak_dir() / "audit.log")
         try:
             if os.path.getsize(path) > _AUDIT_MAX_BYTES:
-                for i in range(_AUDIT_KEEP - 1, 0, -1):
-                    if os.path.exists(f"{path}.{i}"):
-                        os.replace(f"{path}.{i}", f"{path}.{i + 1}")
-                os.replace(path, f"{path}.1")
+                from hermescloak._filelock import FileLock
+                with FileLock(path + ".lock", timeout=2.0):   # one rotator at a time
+                    if os.path.getsize(path) > _AUDIT_MAX_BYTES:
+                        for i in range(_AUDIT_KEEP - 1, 0, -1):
+                            if os.path.exists(f"{path}.{i}"):
+                                os.replace(f"{path}.{i}", f"{path}.{i + 1}")
+                        os.replace(path, f"{path}.1")
         except OSError:
             pass
         FileAuditAlerter(path).send(AlertEvent(kind, home, detail))
@@ -316,7 +319,7 @@ def cloak_sanitize_request(request: dict, session_id=None, api_mode: str = ""):
 
             def _replayed(s):
                 hit = rc.lookup(s, gen)
-                if hit is not None and not leftover_tokens(hit, vault):
+                if hit is not None and not leftover_tokens(hit, vault, tolerant=True):
                     replayed[0] += 1
                     return hit
                 return None
@@ -368,7 +371,8 @@ def _restore_args_string(raw, vault, tolerant=False):
         return raw
     # json.loads decodes \\u27e6-escaped tokens; unparseable args fall back to text restore
     # after un-escaping the bracket pair.
-    restore = lambda t: restore_text(unescape_tokens(t), vault, tolerant)  # noqa: E731
+    tol = "strict" if tolerant else False      # tool args can be code: unambiguous brackets only
+    restore = lambda t: restore_text(unescape_tokens(t), vault, tol)  # noqa: E731
     return transform_json_string(raw, restore)
 
 
@@ -511,7 +515,7 @@ def cloak_restore_args_dict(args):
             return args
         from hermescloak.restorer import restore_json
         eng = _engine_for_session(None)
-        return restore_json(args, eng.vault, bool(eng.profile.tolerant_restore))
+        return restore_json(args, eng.vault, "strict" if eng.profile.tolerant_restore else False)
     except Exception:
         return args
 

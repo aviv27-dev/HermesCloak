@@ -38,7 +38,7 @@ $HERMES_HOME/cloak/
   vault_key_file  # optional: PATH of a Fernet key file → vault encrypted at rest (see below)
   vault_mode      # optional: "memory" = never persist the token map (rollback switch)
   # written by HermesCloak:
-  vaults/         # the per-agent token map: <id>.json snapshot + .journal + .bak  (0600, TTL)
+  vaults/         # the per-agent token map: <id>.json snapshot + .journal + .bak  (0600, TTL from last use)
   replay.json     # replay cache: hash(restored text) → the model's own tokenized text
   audit.log       # JSONL events, counts/types only — never real values (rotates at 5 MB × 3)
 ```
@@ -85,7 +85,8 @@ silently reducing coverage.
 | gateway restart / crash / `kill -9` mid-write | every new mapping is fsync'd to the vault journal **before** its token is used; a torn last line is skipped; snapshot written twice (main + `.bak`) atomically. Verified by a chaos test (4 processes, random SIGKILL, ~28k tokens: 0 lost, 0 reused). |
 | several processes on one HERMES_HOME (gateway + cron + CLI + subagents) | minting and every disk read happen under an exclusive file lock; a token minted elsewhere is picked up on demand — never the same token for two values |
 | vault file corrupted | quarantined as `.corrupt-<ts>`, `.bak` loaded instead (`vault_corrupt_quarantined`, `vault_restored_from_backup`) |
-| encrypted vault, key missing/wrong | vault goes memory-only and **never overwrites** the encrypted file (`vault_locked`) |
+| encrypted vault, key missing/wrong (e.g. a cron job without the key env) | that process goes memory-only, **never overwrites** the encrypted data, and mints from a far-away number range so its tokens cannot collide with the readable vault's (`vault_locked`); a corrupt encrypted snapshot falls back to `.bak` |
+| vault idle / swept / deleted while in use | the TTL counts from last **use** (restores and reuse refresh it); sweeps re-check under the vault lock; a live process that finds its file gone rewrites it (`vault_resurrected`) |
 | broken `profile.yaml` / unreadable `gazetteer.txt` | last good version kept (`config_error`) |
 | NER service hung or down | circuit breaker: one timeout, then NER is skipped for 30 s (`ner_down` / `ner_up`) instead of a timeout per message |
 | internal filter error | `fail_mode: open` → original sent + `unfiltered_sent`; `fail_mode: closed` → text withheld + `blocked_send` |

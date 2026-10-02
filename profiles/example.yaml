@@ -18,7 +18,7 @@ tolerant_restore: true     # also restore lightly mangled tokens: ⟦לקוח 1�
 replay_cache: true         # send the model's own earlier turns back byte-identically
                            # (prompt cache + Claude thinking-signature safe)
 audit_new_pii: true        # audit (counts only) PII the model introduced or masked values it echoed
-vault_ttl_hours: 24        # the token map expires this long after its last new entry
+vault_ttl_hours: 24        # the token map expires this long after its last use
 # entity_source is wired by the adapter layer:
 #   generic users -> a StaticFileSource("names.txt")  ($HERMES_HOME/cloak/gazetteer.txt)
 #   firm deployment -> a custom DB-backed EntitySource (lives in the adapter, not core)

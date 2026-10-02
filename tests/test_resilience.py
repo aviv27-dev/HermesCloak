@@ -433,3 +433,71 @@ def test_shadow_mode_never_writes_a_vault(home):
     assert not vdir.exists() or not [f for f in vdir.iterdir() if not f.name.endswith(".lock")]
     shadow = [e for e in _audit(home) if e["kind"] == "shadow_detect"]
     assert shadow and json.loads(shadow[-1]["detail"]) == {"לקוח": 1, "טלפון": 1}
+
+
+# ---------------------------------------------------------------- review regressions
+
+def test_keyless_process_never_reuses_a_keyed_process_token(tmp_path):
+    p = str(tmp_path / "v.json")
+    key = generate_key()
+    DurableVault(p).tokenize("plain-first", "T")             # plaintext vault exists
+    a = DurableVault(p, key=key)
+    ta = a.tokenize("bob", "T")                               # encrypted journal line
+    b = DurableVault(p)                                       # no key in this process
+    tb = b.tokenize("carol", "T")
+    assert tb != ta and b.memory_only
+    assert DurableVault(p, key=key).restore_token(ta) == "bob"
+    w = DurableVault(p, key=generate_key())                   # wrong key: same guarantee
+    assert w.memory_only and w.tokenize("dave", "T") != ta
+    assert DurableVault(p, key=key).restore_token(ta) == "bob"
+
+
+def test_in_use_vault_is_not_swept_and_resurrects(tmp_path):
+    p = str(tmp_path / "v.json")
+    v = DurableVault(p, ttl_seconds=60)
+    t1 = v.tokenize("v1", "T")
+    old = time.time() - 3600
+    for f in (p, p + ".journal"):
+        if os.path.exists(f):
+            os.utime(f, (old, old))
+    v._last_touch = 0
+    assert v.restore_token(t1) == "v1"                        # use refreshes the TTL
+    assert DurableVault.sweep_expired(str(tmp_path), 60) == 0
+    os.remove(p)                                              # deleted behind its back anyway
+    v.tokenize("v2", "T")
+    fresh = DurableVault(p, ttl_seconds=60)
+    assert fresh.restore_token(t1) == "v1"
+    assert "vault_resurrected" in v.events
+
+
+def test_corrupt_encrypted_snapshot_falls_back_to_backup(tmp_path):
+    p = str(tmp_path / "v.json")
+    key = generate_key()
+    v = DurableVault(p, key=key)
+    tok = v.tokenize("x", "T")
+    with open(p, "r+b") as f:                                 # corrupt the ciphertext
+        f.seek(30)
+        f.write(b"XXXXXXXX")
+    r = DurableVault(p, key=key)
+    assert not r.memory_only and r.restore_token(tok) == "x"
+    assert "vault_restored_from_backup" in r.events
+
+
+def test_leftover_detects_mangled_underscore_types():
+    from hermescloak.restorer import leftover_tokens
+    from hermescloak.vault import Vault
+    v = Vault()
+    v.tokenize("4111", "CREDIT_CARD")
+    assert leftover_tokens("[CREDITCARD 9]", v, True) == ["⟦CREDITCARD_9⟧"]
+
+
+def test_replay_cache_merges_across_processes(tmp_path):
+    from hermescloak.replay import ReplayCache
+    path = str(tmp_path / "replay.json")
+    a, b = ReplayCache(path), ReplayCache(path)
+    a.remember("real A", "tok A", "g")
+    a.save()
+    b.remember("real B", "tok B", "g")
+    b.save()
+    c = ReplayCache(path)
+    assert c.lookup("real A", "g") == "tok A" and c.lookup("real B", "g") == "tok B"

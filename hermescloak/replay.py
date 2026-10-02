@@ -87,7 +87,32 @@ class ReplayCache:
         if not self.path or not self._dirty:
             return
         try:
+            from hermescloak._filelock import FileLock
+            lock = FileLock(self.path + ".lock", timeout=2.0)
+        except Exception:
+            return
+        with lock:
+            self._save_locked()
+
+    def _save_locked(self) -> None:
+        try:
+            # merge what other processes saved meanwhile (theirs first, ours win, newest last)
+            disk: "OrderedDict[str, tuple[str, str]]" = OrderedDict()
+            if os.path.exists(self.path):
+                try:
+                    with open(self.path, encoding="utf-8") as f:
+                        for k, v in json.load(f).get("entries", []):
+                            if isinstance(k, str) and isinstance(v, list) and len(v) == 2:
+                                disk[k] = (str(v[0]), str(v[1]))
+                except Exception:
+                    pass
             with self._lock:
+                for k, v in self._d.items():
+                    disk.pop(k, None)
+                    disk[k] = v
+                while len(disk) > self.max_entries:
+                    disk.popitem(last=False)
+                self._d = disk
                 entries = [[k, list(v)] for k, v in self._d.items()]
                 self._dirty = False
             d = os.path.dirname(self.path)
