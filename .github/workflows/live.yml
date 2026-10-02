@@ -28,6 +28,7 @@ jobs:
     env:
       OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY || secrets.OLLAMA_TEST_KEY }}
       HC_LIVE_MODEL: ${{ inputs.model || vars.HC_LIVE_MODEL || 'gpt-oss:120b' }}
+      MODEL: ${{ inputs.model || vars.HC_LIVE_MODEL || 'gpt-oss:120b' }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -35,6 +36,15 @@ jobs:
         run: |
           if [ -z "$OLLAMA_API_KEY" ]; then
             echo "::error::Repository secret OLLAMA_API_KEY (or OLLAMA_TEST_KEY) is not set (Settings → Secrets and variables → Actions)"
+            exit 1
+          fi
+      - name: Resolve model on Ollama Cloud
+        run: |
+          ids=$(curl -sf -H "Authorization: Bearer $OLLAMA_API_KEY" https://ollama.com/v1/models \
+                | python3 -c "import json,sys; print('\n'.join(sorted(m['id'] for m in json.load(sys.stdin)['data'])))") || true
+          echo "Available models:"; echo "$ids" | sed 's/^/  /'
+          if [ -n "$ids" ] && ! echo "$ids" | grep -qxF "$MODEL"; then
+            echo "::error::model '$MODEL' is not offered by Ollama Cloud — set the repository variable HC_LIVE_MODEL to one of the names above"
             exit 1
           fi
       - name: Live sandbox (offline e2e + real model)

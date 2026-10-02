@@ -47,6 +47,15 @@ jobs:
           case "$MINUTES" in ''|*[!0-9]*) echo "::error::TELEGRAM_SANDBOX_MINUTES must be a number"; exit 1;; esac
           [ "$MINUTES" -le 300 ] || { echo "::error::TELEGRAM_SANDBOX_MINUTES max is 300"; exit 1; }
 
+      - name: Resolve model on Ollama Cloud
+        run: |
+          ids=$(curl -sf -H "Authorization: Bearer $OLLAMA_API_KEY" https://ollama.com/v1/models \
+                | python3 -c "import json,sys; print('\n'.join(sorted(m['id'] for m in json.load(sys.stdin)['data'])))") || true
+          echo "Available models:"; echo "$ids" | sed 's/^/  /'
+          if [ -n "$ids" ] && ! echo "$ids" | grep -qxF "$MODEL"; then
+            echo "::error::model '$MODEL' is not offered by Ollama Cloud — set the repository variable HC_LIVE_MODEL to one of the names above"
+            exit 1
+          fi
       - name: Install hermes-agent + HermesCloak
         run: |
           SANDBOX_INSTALL_ONLY=1 bash install/live_sandbox.sh
