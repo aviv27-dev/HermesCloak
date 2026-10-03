@@ -124,7 +124,7 @@ fail-safe alarm — investigate).
 | Event | Meaning |
 |-------|---------|
 | `plugin_active` | plugin loaded: per-interception-point status + `self_test` |
-| `enforce_send` | a request was tokenized: entity counts, `real_values_in_outbound` (must be 0), `replayed` |
+| `enforce_send` | a request was tokenized: `in_request` (distinct tokens per type in THIS request), `in_system_prompt` (the part of those inside the system prompt, e.g. names in SOUL.md), `entities` (cumulative distinct values in the vault, all turns so far — not this turn), `real_values_in_outbound` (must be 0), `replayed` |
 | `enforce_restore` | a reply was restored; `leftover` > 0 = alarm |
 | `leftover_token` | which token(s) could not be restored |
 | `leaked_original` | the model wrote a value we had masked — it saw it via some unmasked path: **investigate** |

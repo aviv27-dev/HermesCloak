@@ -82,7 +82,7 @@ Expect: entity counts include `סוד`; `real_values_in_outbound: 0`.
 
 Append `דנה בדיקה\tלקוח` to `gazetteer.txt`, then mention "דנה בדיקה" in the **same** session.
 
-Expect: the next `enforce_send` counts one more לקוח.
+Expect: the next `enforce_send` counts one more לקוח in `entities` (cumulative) and shows it in `in_request`.
 
 ## 7. Health summary
 

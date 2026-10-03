@@ -170,7 +170,8 @@ def audit_summary(hours=24.0):
 
 
 def last_masked_summary():
-    """Entity-type counts from the latest enforce_send event (distinct values masked so far)."""
+    """The latest enforce_send event's counts: ``in_request`` / ``in_system_prompt`` (that turn)
+    and ``entities`` (cumulative distinct values in the vault)."""
     path = os.path.join(hermes_home(), "cloak", "audit.log")
     last = None
     try:
@@ -178,7 +179,7 @@ def last_masked_summary():
             if '"enforce_send"' in line:
                 last = line
         detail = json.loads(json.loads(last)["detail"]) if last else {}
-        return detail.get("entities") or {}
+        return detail if isinstance(detail, dict) else {}
     except Exception:
         return {}
 
@@ -257,9 +258,15 @@ def verify(root, strict=False):
         ok &= not bad
     if counts:
         print("  [info] events: " + ", ".join(f"{k}×{v}" for k, v in sorted(counts.items())))
-    masked = last_masked_summary()
-    if masked:
-        print("  [info] masked by type (distinct values): " + ", ".join(f"{k}: {v}" for k, v in sorted(masked.items())))
+    last = last_masked_summary()
+
+    def _fmt(d):
+        return ", ".join(f"{k}: {v}" for k, v in sorted(d.items())) or "none"
+    if "in_request" in last:
+        print("  [info] last turn sent as tokens: " + _fmt(last["in_request"])
+              + "  (of which in the system prompt: " + _fmt(last.get("in_system_prompt") or {}) + ")")
+    if last.get("entities"):
+        print("  [info] vault total, all turns so far (distinct values): " + _fmt(last["entities"]))
     inc = {k: counts[k] for k in INCIDENTS if counts.get(k)}
     for k in INFO:
         if counts.get(k):

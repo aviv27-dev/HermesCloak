@@ -94,3 +94,21 @@ def test_inject_instruction_per_wire_format():
 def test_unescape_tokens():
     assert p.unescape_tokens(r'x ⟦מייל_1⟧ y') == "x ⟦מייל_1⟧ y"
     assert p.unescape_tokens("plain") == "plain"
+
+
+def test_system_text_blob_per_wire_format():
+    assert p.system_text_blob({"instructions": "I", "input": []}) == "I"
+    assert p.system_text_blob({"system": [{"type": "text", "text": "S"}], "messages": []}) == "S"
+    chat = {"messages": [{"role": "system", "content": "SYS"}, {"role": "user", "content": "U"}]}
+    assert p.system_text_blob(chat) == "SYS"
+
+
+def test_audit_counts_this_turn_and_system_prompt_separately():
+    from hermescloak.adapter.hermes_live import _tokens_by_type
+    from hermescloak.vault import Vault
+    v = Vault()
+    a, b = v.tokenize("דנה לוי", "לקוח"), v.tokenize("050-1234567", "טלפון")
+    v.tokenize("ערך מתור קודם", "לקוח")           # in the vault, not in this request
+    text = f"{a} {a} {b} ⟦לקוח_99⟧"                 # repeats count once; unknown token ignored
+    assert _tokens_by_type(text, v) == {"טלפון": 1, "לקוח": 1}
+    assert v.summary()["לקוח"] == 2                  # cumulative, which is what misled the test

@@ -129,6 +129,29 @@ def request_text_blob(request: dict) -> str:
     return "\n".join(parts)
 
 
+def system_text_blob(request: dict) -> str:
+    """The system-prompt text of a request (Responses ``instructions``, Anthropic/Bedrock
+    ``system``, chat ``system``/``developer`` messages), for the per-request audit breakdown."""
+    parts: list[str] = []
+
+    def _texts(v):
+        if isinstance(v, str):
+            parts.append(v)
+        elif isinstance(v, list):
+            for b in v:
+                if isinstance(b, dict) and isinstance(b.get("text"), str):
+                    parts.append(b["text"])
+                elif isinstance(b, str):
+                    parts.append(b)
+
+    _texts(request.get("instructions"))
+    _texts(request.get("system"))
+    for m in request.get("messages") or []:
+        if isinstance(m, dict) and m.get("role") in ("system", "developer"):
+            _texts(m.get("content"))
+    return "\n".join(parts)
+
+
 def unescape_tokens(raw: str) -> str:
     """``\\u27e6TYPE_1\\u27e7`` (a token inside ensure_ascii JSON) → ``⟦TYPE_1⟧``."""
     if "\\u27e6" not in raw and "\\u27E6" not in raw:

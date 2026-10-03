@@ -288,6 +288,16 @@ _REDACTED = "[HermesCloak: content withheld — PII filter failed (fail_mode: cl
 
 # ---------------------------------------------------------------- outbound
 
+def _tokens_by_type(text: str, vault) -> dict:
+    """type -> number of DISTINCT vault tokens in ``text`` (counts only, no values)."""
+    from hermescloak.tokens import TOKEN_RE
+    seen: dict = {}
+    for m in TOKEN_RE.finditer(text or ""):
+        if vault.restore_token(m.group(0)) is not None:
+            seen.setdefault(m.group(1), set()).add(m.group(0))
+    return {t: len(v) for t, v in sorted(seen.items())}
+
+
 def cloak_sanitize_request(request: dict, session_id=None, api_mode: str = ""):
     """Tokenize a PROVIDER-SHAPED request (hermes ``llm_request`` middleware payload).
 
@@ -330,13 +340,17 @@ def cloak_sanitize_request(request: dict, session_id=None, api_mode: str = ""):
 
             raw_args = _replayed
         sanitized = _p.transform_request(request, fn, raw_args=raw_args)
+        # measured BEFORE the instruction is added, so its example tokens never count
+        in_request = _tokens_by_type(_p.request_text_blob(sanitized), eng.vault)
+        in_system = _tokens_by_type(_p.system_text_blob(sanitized), eng.vault)
         if eng.profile.token_instruction and not eng.vault.is_empty():
             from hermescloak.instruction import TOKEN_INSTRUCTION
             sanitized = _p.inject_instruction(sanitized, TOKEN_INSTRUCTION, api_mode)
         getattr(eng.vault, "save", lambda: None)()
         _drain_vault_events(eng.vault)
         _audit("enforce_send", json.dumps(
-            {"entities": eng.vault.summary(),
+            {"in_request": in_request, "in_system_prompt": in_system,
+             "entities": eng.vault.summary(),
              "real_values_in_outbound": eng.vault.count_present(_p.request_text_blob(sanitized)),
              "replayed": replayed[0], "api_mode": api_mode or "?"},
             ensure_ascii=False))
