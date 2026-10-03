@@ -1,112 +1,591 @@
-"""Durable, per-session Vault — survives process restart / engine recreation.
+"""Durable, per-agent Vault — survives restarts, crashes, corruption and multiple processes.
 
-The in-memory Vault loses its token<->real map when the gateway restarts or the
-per-session engine is recreated; any token issued before then becomes unrestorable
-and leaks through (observed in the field: ⟦מזהה_6⟧ embedded in a generated document).
-DurableVault persists the map to a per-session file so the SAME session reloads its
-full mapping (and keeps token numbering continuous) across restarts.
+The in-memory Vault loses its token<->real map when the gateway restarts; any token issued
+before then becomes unrestorable and leaks through (observed in the field: ⟦מזהה_6⟧ embedded
+in a generated document). DurableVault persists the map and keeps it consistent:
 
-Lifecycle / safety:
-  * One file per session under <dir>/<sha16(session_id)>.json, written atomically, 0600.
-  * NOT deleted after each restore (the session continues and later replies still need
-    it). Expires by TTL; expired files are swept + deleted. `clear()` deletes on demand
-    (use at session end).
-  * The file IS a PII store (token<->real). It lives only on the local machine, same
-    trust boundary as the agent's own conversation DB. Encrypt-at-rest is an optional
-    follow-up; for now rely on 0600 + TTL + clear().
+  * WRITE-THROUGH, O(1): a new mapping is appended (fsync'd) to ``<file>.journal`` before its
+    token is returned, so a crash can never leave a token in flight that no file can restore;
+    the snapshot is compacted every ``COMPACT_EVERY`` entries (rewriting the whole file per new
+    value was O(n²): 200 new names on a 20k-entry vault took 4 s).
+  * CROSS-PROCESS: minting happens under an exclusive file lock after re-reading the file, so
+    the gateway, cron jobs and CLI sessions sharing one HERMES_HOME never issue the same token
+    for different values; a token minted by another process is picked up on demand.
+  * CRASH/CORRUPTION SAFE: atomic replace, previous version kept as ``.bak``; an unreadable
+    file is quarantined (``.corrupt-<ts>``) and the backup is loaded instead of starting empty.
+  * ENCRYPTION AT REST (optional): with a Fernet key (``cryptography`` package) the file is
+    encrypted. Keep the key OUTSIDE the cloak dir. If the file is encrypted and no usable key
+    is available the vault goes memory-only and NEVER overwrites the encrypted file.
+  * GENERATION: a random id per vault lifetime; caches keyed to tokens (the replay cache)
+    discard entries from an older generation.
+  * TTL: the file expires ``ttl_seconds`` after its last change; expired files (and their
+    backups) are swept.
+
+The file IS a PII store. It lives on the local machine, same trust boundary as the agent's own
+conversation DB: 0600 + TTL + optional encryption.
 """
+from __future__ import annotations
+
+import base64
 import hashlib
 import json
 import os
+import random
 import tempfile
 import time
+import uuid
 from pathlib import Path
 
+from hermescloak._filelock import FileLock
 from hermescloak.vault import Vault
 
 DEFAULT_TTL_SECONDS = 24 * 3600
+MAGIC = b"HCVAULT-FERNET-1\n"
+COMPACT_EVERY = 256
 
 
 def _now() -> float:
     return time.time()
 
 
+class VaultLocked(Exception):
+    """The vault file is encrypted and no usable key is available."""
+
+
+def _fernet(key):
+    if not key:
+        return None
+    from cryptography.fernet import Fernet   # optional dependency ([crypto] extra)
+    return Fernet(key if isinstance(key, bytes) else key.encode("ascii"))
+
+
+def generate_key() -> str:
+    """A new Fernet key (urlsafe base64, 32 bytes) — store it OUTSIDE the cloak dir."""
+    return base64.urlsafe_b64encode(os.urandom(32)).decode("ascii")
+
+
+def read_payload(path: str, key=None) -> dict:
+    """Read + (if needed) decrypt one vault file. Raises VaultLocked / ValueError / OSError."""
+    with open(path, "rb") as f:
+        raw = f.read()
+    if raw.startswith(MAGIC):
+        if not key:
+            raise VaultLocked(path)
+        try:
+            f = _fernet(key)
+        except ImportError as exc:
+            raise VaultLocked(f"{path}: cryptography not installed") from exc
+        try:
+            raw = f.decrypt(raw[len(MAGIC):])
+        except Exception as exc:  # InvalidToken (wrong key) or truncated ciphertext
+            raise VaultLocked(f"{path}: cannot decrypt ({type(exc).__name__})") from exc
+    data = json.loads(raw.decode("utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("vault payload is not an object")
+    return data
+
+
+def _encrypt_line(key, obj: dict) -> bytes:
+    raw = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+    if key:
+        return b"E:" + _fernet(key).encrypt(raw) + b"\n"
+    return raw + b"\n"
+
+
+def _decrypt_line(key, line: bytes) -> dict:
+    if line.startswith(b"E:"):
+        if not key:
+            raise VaultLocked("journal")
+        try:
+            line = _fernet(key).decrypt(line[2:])
+        except ImportError as exc:
+            raise VaultLocked("journal: cryptography not installed") from exc
+        except Exception as exc:          # wrong key: NEVER treat as a skippable bad line
+            raise VaultLocked("journal: cannot decrypt") from exc
+    obj = json.loads(line.decode("utf-8"))
+    if not isinstance(obj, dict) or "t" not in obj or "r" not in obj:
+        raise ValueError("bad journal entry")
+    return obj
+
+
+def _fsync_dir(d: str) -> None:
+    """Make renames/truncations durable across power loss (POSIX; no-op elsewhere)."""
+    if os.name == "nt":
+        return
+    try:
+        fd = os.open(d or ".", os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
+def _last_byte(fd: int, path: str, size: int) -> bytes:
+    if hasattr(os, "pread"):
+        return os.pread(fd, 1, size - 1)
+    with open(path, "rb") as f:                       # Windows: no pread
+        f.seek(size - 1)
+        return f.read(1)
+
+
+def read_journal(path: str, key=None, offset: int = 0) -> tuple[list[dict], int, int]:
+    """(entries, new_offset, bad_lines) from ``path`` starting at byte ``offset``. Only complete
+    (newline-terminated) lines are consumed; a torn last line (crash mid-append) is left for later
+    and an undecodable line is skipped and counted."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(offset)
+            data = f.read()
+    except OSError:
+        return [], offset, 0
+    entries, bad, consumed = [], 0, 0
+    for line in data.split(b"\n")[:-1]:              # last element = incomplete tail (or b"")
+        consumed += len(line) + 1
+        if not line.strip():
+            continue
+        try:
+            entries.append(_decrypt_line(key, line))
+        except VaultLocked:
+            raise
+        except Exception:
+            bad += 1
+    return entries, offset + consumed, bad
+
+
 class DurableVault(Vault):
-    def __init__(self, path: str, ttl_seconds: int = DEFAULT_TTL_SECONDS) -> None:
+    def __init__(self, path: str, ttl_seconds: int = DEFAULT_TTL_SECONDS, key=None) -> None:
         super().__init__()
         self.path = str(path)
+        self.journal_path = self.path + ".journal"
         self.ttl_seconds = ttl_seconds
+        self._key = key
         self._dirty = False
-        self._load()
+        self._seen: tuple | None = None       # (mtime_ns, size) of the snapshot we merged
+        self._joff = 0                         # bytes of the journal already merged
+        self._jlines = 0                       # journal entries since the last compaction
+        self._last_sync = 0.0
+        self._last_touch = 0.0
+        self._gen_persisted = False            # our generation is on disk / shared with others
+        self.generation: str = ""
+        self.memory_only = False               # set when the file cannot be safely written
+        self.conflicts = 0                     # token clashes found while merging other writers
+        self.events: list[str] = []            # load/save incidents for the adapter's audit log
+        if key:
+            try:
+                _fernet(key)
+            except ImportError:
+                self.memory_only = True
+                self._key_failure = "vault_crypto_unavailable"
+            except Exception:
+                self.memory_only = True
+                self._key_failure = "vault_key_invalid"
+        if not self.memory_only:
+            # every disk read happens under the cross-process lock: an unlocked read racing a
+            # compaction could see an old snapshot + an already-emptied journal, believe it is
+            # current, and later mint a token number another process already used
+            with FileLock(self.path + ".lock"):
+                self._load()
+        else:
+            self._load()
+        if self.generation:
+            self._gen_persisted = True            # we joined an existing vault's lifetime
+        if getattr(self, "_key_failure", None):
+            self._go_memory_only(self._key_failure)
+        if not self.generation:
+            self.generation = uuid.uuid4().hex
 
-    # ---- persistence ----
-    def _load(self) -> None:
+    # ---------------------------------------------------------------- loading / merging
+    @staticmethod
+    def _stat_of(path):
         try:
-            if not os.path.exists(self.path):
-                return
-            if self.ttl_seconds and (_now() - os.path.getmtime(self.path)) > self.ttl_seconds:
-                self._delete_file()           # expired → start fresh
-                return
-            with open(self.path, encoding="utf-8") as f:
-                data = json.load(f)
-            self._real_to_token = dict(data.get("real_to_token", {}))
-            self._token_to_real = dict(data.get("token_to_real", {}))
-            self._counters = {k: int(v) for k, v in data.get("counters", {}).items()}
-        except Exception:
-            # corrupt/unreadable → start empty rather than crash (fail-open spirit)
-            self._real_to_token, self._token_to_real, self._counters = {}, {}, {}
+            st = os.stat(path)
+            return (st.st_mtime_ns, st.st_size, st.st_ino)
+        except OSError:
+            return None
 
-    def save(self) -> None:
-        if not self._dirty:
+    def _stat(self):
+        return self._stat_of(self.path)
+
+    def _last_change(self) -> float | None:
+        ts = []
+        for p in (self.path, self.journal_path):
+            st = self._stat_of(p)
+            if st is not None and (p == self.path or st[1] > 0):   # an EMPTY journal is no activity
+                ts.append(st[0] / 1e9)
+        return max(ts) if ts else None
+
+    def _load(self) -> None:
+        paths = (self.path, self.path + ".bak", self.journal_path)
+        if not any(os.path.exists(p) for p in paths):
+            return
+        last = self._last_change()
+        if self.ttl_seconds and last is not None and (_now() - last) > self.ttl_seconds:
+            try:                                 # expired → start fresh (new generation)
+                old = read_payload(self.path, self._key).get("generation", "")
+            except Exception:
+                old = ""
+            self._delete_file()
+            self._tombstone(old)
+            return
+        locked_main = False
+        for candidate in (self.path, self.path + ".bak"):
+            if not os.path.exists(candidate):
+                continue
+            try:
+                data = read_payload(candidate, self._key)
+            except VaultLocked:
+                if candidate == self.path and self._key and os.path.exists(self.path + ".bak"):
+                    locked_main = True           # wrong key OR corrupt ciphertext: ask the backup
+                    continue
+                self._go_memory_only()           # never overwrite what we cannot read
+                return
+            except Exception:
+                if candidate == self.path:       # quarantine, then try the backup
+                    try:
+                        os.replace(self.path, f"{self.path}.corrupt-{int(_now())}")
+                    except OSError:
+                        pass
+                    self.events.append("vault_corrupt_quarantined")
+                continue
+            if locked_main:                       # the backup decrypts → the main copy is corrupt
+                try:
+                    os.replace(self.path, f"{self.path}.corrupt-{int(_now())}")
+                except OSError:
+                    pass
+                self.events.append("vault_corrupt_quarantined")
+            self._merge(data.get("token_to_real") or {}, data.get("counters") or {}, data.get("generation"))
+            if candidate != self.path:
+                self.events.append("vault_restored_from_backup")
+            self._seen = self._stat()
+            break
+        else:
+            if locked_main:                       # neither copy decrypts: wrong key
+                self._go_memory_only()
+                return
+        try:
+            self._read_journal()
+        except VaultLocked:
+            self._go_memory_only()
+            return
+        if "vault_restored_from_backup" in self.events and not self.memory_only:
+            self._compact()                      # re-establish the main file (lock already held)
+
+    def _go_memory_only(self, reason: str = "vault_locked") -> None:
+        """Stop touching disk (we cannot read what is there, so we must never write over it),
+        mint from a far-away random number range so our tokens cannot collide with the ones the
+        processes that CAN read the file are issuing, and take a private generation so nothing
+        keyed to generations (the shared replay cache) can mix our tokens with theirs."""
+        if getattr(self, "_memory_base", None) is not None:
+            return
+        self.memory_only = True
+        self.events.append(reason)
+        with self._lock:
+            base = random.randrange(500_000, 990_000)
+            for k in list(self._counters) or []:
+                self._counters[k] = max(self._counters[k], base)
+            self._memory_base = base
+            self.generation = "mem-" + uuid.uuid4().hex
+
+    def _merge(self, t2r: dict, counters: dict | None = None, generation=None) -> None:
+        """Adopt another writer's mappings without ever breaking our own."""
+        with self._lock:
+            for tok, real in t2r.items():
+                mine = self._token_to_real.get(tok)
+                if mine is None:
+                    self._token_to_real[tok] = real                      # restorable everywhere
+                    self._real_to_token.setdefault(real, tok)
+                elif mine != real:
+                    self.conflicts += 1                                   # keep ours; count it
+            for k, v in (counters or {}).items():
+                try:
+                    self._counters[k] = max(int(v), self._counters.get(k, 0))
+                except (TypeError, ValueError):
+                    pass
+            if not self.generation and isinstance(generation, str):
+                self.generation = generation
+
+    def _read_journal(self) -> None:
+        if self._joff > (self._stat_of(self.journal_path) or (0, 0))[1]:
+            self._joff = 0                        # compacted (truncated) by another process
+        entries, self._joff, bad = read_journal(self.journal_path, self._key, self._joff)
+        for e in entries:
+            self._merge({e["t"]: e["r"]}, {e.get("k", ""): e.get("n", 0)} if e.get("k") else None,
+                        e.get("g"))
+        self._jlines += len(entries)
+        if bad:
+            self.events.append("vault_journal_lines_skipped")
+
+    def sync(self, force: bool = False) -> bool:
+        """Merge whatever other processes wrote since we last looked (one or two stats when idle)."""
+        if self.memory_only:
+            return False
+        with FileLock(self.path + ".lock"):
+            return self._sync_locked(force)
+
+    def _sync_locked(self, force: bool = False) -> bool:
+        changed = False
+        st = self._stat()
+        if st is None and self._seen is not None and not self.is_empty():
+            try:
+                cleared_gen = open(self.path + ".cleared", encoding="utf-8").read().strip()
+                cleared = cleared_gen in ("", self.generation)   # "" = TTL sweep of an idle vault
+            except OSError:
+                cleared = False
+            if cleared and not self._dirty:
+                # OUR generation was deleted on purpose (clear / TTL): drop our copy too —
+                # never write it back
+                self._swap_in(None, "vault_cleared_elsewhere")
+                self._seen = None
+                return True
+            if cleared:
+                self.events.append("vault_reset_deferred")    # unwritten mints: keep them
+            # vanished without a tombstone (deleted by hand / lost): re-establish it from memory
+            # rather than let another process restart the numbering and reuse our tokens
+            self.events.append("vault_resurrected")
+            self._dirty = True
+            self._compact()
+            return True
+        if st is not None and (st != self._seen or force):
+            self._joff = 0                        # a new snapshot comes with a fresh journal
+            try:
+                data = read_payload(self.path, self._key)
+                disk_gen = data.get("generation")
+                if disk_gen and disk_gen != self.generation and not self._gen_persisted:
+                    # we invented a generation before any file existed and someone else created
+                    # the vault first: CONVERGE on theirs (nothing of ours was cleared)
+                    with self._lock:
+                        self.generation = disk_gen
+                    self._gen_persisted = True
+                if disk_gen and disk_gen != self.generation and not self._dirty:
+                    # the generation we shared was dropped and a NEW vault started: our map
+                    # belongs to a dead lifetime and must not leak into the new one
+                    self._swap_in(data, "vault_generation_changed")
+                else:
+                    if disk_gen and disk_gen != self.generation:
+                        self.events.append("vault_reset_deferred")
+                    self._merge(data.get("token_to_real") or {}, data.get("counters") or {}, disk_gen)
+                self._seen = st
+                changed = True
+            except VaultLocked:
+                self._go_memory_only()
+                return changed
+            except Exception:
+                self.events.append("vault_snapshot_unreadable")   # journal re-read from 0 below
+        jst = self._stat_of(self.journal_path)
+        if jst is not None and jst[1] != self._joff:
+            before = len(self._token_to_real)
+            try:
+                self._read_journal()
+            except VaultLocked:
+                self._go_memory_only()
+                return changed
+            changed = changed or len(self._token_to_real) != before
+        return changed
+
+    def _touch(self) -> None:
+        """Mark the vault as IN USE (TTL counts from last use, not last new value), at most
+        every 5 minutes. Without this a busy gateway that only reuses known values let the
+        file 'expire' and another process swept it and restarted the numbering."""
+        every = min(300.0, (self.ttl_seconds or 1200) / 4)
+        if self.memory_only or _now() - self._last_touch < every:
+            return
+        self._last_touch = _now()
+        try:
+            os.utime(self.path)
+        except OSError:
+            pass
+
+    # ---------------------------------------------------------------- writing
+    def _payload_bytes(self) -> bytes:
+        with self._lock:
+            payload = {
+                "ts": _now(),
+                "generation": self.generation,
+                "real_to_token": dict(self._real_to_token),
+                "token_to_real": dict(self._token_to_real),
+                "counters": dict(self._counters),
+            }
+            self._dirty = False                   # cleared under the lock: a racing mint re-dirties
+        raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        if self._key:
+            raw = MAGIC + _fernet(self._key).encrypt(raw)
+        return raw
+
+    def _compact(self) -> None:
+        """Write a full snapshot (atomic, keeps .bak) and empty the journal. Caller holds the lock."""
+        if self.memory_only:
             return
         try:
             d = os.path.dirname(self.path)
             if d:
                 os.makedirs(d, exist_ok=True)
-            payload = {
-                "ts": _now(),
-                "real_to_token": self._real_to_token,
-                "token_to_real": self._token_to_real,
-                "counters": self._counters,
-            }
-            fd, tmp = tempfile.mkstemp(dir=d or ".", prefix=".vault-", suffix=".tmp")
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    json.dump(payload, f, ensure_ascii=False)
+            raw = self._payload_bytes()
+            # the SAME snapshot is written twice (backup first, then main), each atomically: a
+            # crash or corruption of either copy leaves the other complete, and the journal is
+            # only emptied after both are on disk
+            for target in (self.path + ".bak", self.path):
+                fd, tmp = tempfile.mkstemp(dir=d or ".", prefix=".vault-", suffix=".tmp")
                 try:
-                    os.chmod(tmp, 0o600)
-                except OSError:
-                    pass                      # best-effort (e.g. Windows)
-                os.replace(tmp, self.path)    # atomic
-            finally:
-                if os.path.exists(tmp):
-                    os.remove(tmp)
-            self._dirty = False
+                    with os.fdopen(fd, "wb") as f:
+                        f.write(raw)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    try:
+                        os.chmod(tmp, 0o600)
+                    except OSError:
+                        pass                      # best-effort (e.g. Windows)
+                    os.replace(tmp, target)       # atomic
+                finally:
+                    if os.path.exists(tmp):
+                        os.remove(tmp)
+            _fsync_dir(d)
+            self._seen = self._stat()
+            self._gen_persisted = True
+            try:
+                os.remove(self.path + ".cleared")   # a fresh vault lifetime has begun
+            except OSError:
+                pass
+            with open(self.journal_path, "wb") as jf:   # snapshot holds everything now
+                jf.flush()
+                os.fsync(jf.fileno())
+            self._joff = 0
+            self._jlines = 0
         except Exception:
-            pass                              # never raise into the agent
+            self._dirty = True                    # retry later; never raise into the agent
+            self.events.append("vault_write_failed")
 
-    def _delete_file(self) -> None:
+    def _append(self, token: str, real: str, entity_type: str, n: int) -> None:
+        """Durably record one new mapping (O(1)). Caller holds the lock and has synced."""
         try:
-            if os.path.exists(self.path):
-                os.remove(self.path)
+            d = os.path.dirname(self.journal_path)
+            if d:
+                os.makedirs(d, exist_ok=True)
+            line = _encrypt_line(self._key, {"t": token, "r": real, "k": entity_type, "n": n,
+                                             "g": self.generation})
+            fd = os.open(self.journal_path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
+            try:
+                size = os.fstat(fd).st_size
+                if size and _last_byte(fd, self.journal_path, size) != b"\n":
+                    # a crash left a torn last line: terminate it (it becomes one skipped bad
+                    # line) so this entry is not glued onto it and lost too
+                    os.write(fd, b"\n")
+                    self._joff = max(self._joff, size + 1)
+                os.write(fd, line)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            self._joff += len(line)
+            self._jlines += 1
+            self._gen_persisted = True
+            if self._jlines >= COMPACT_EVERY or not os.path.exists(self.path):
+                self._compact()
+        except Exception:
+            self._dirty = True
+            self.events.append("vault_write_failed")
+
+    def save(self) -> None:
+        """Compact if a journal append failed earlier (retry) — the normal path is already durable."""
+        if not self._dirty or self.memory_only:
+            return
+        with FileLock(self.path + ".lock"):
+            self._sync_locked()
+            self._compact()
+
+    def _tombstone(self, generation: str) -> None:
+        """Record that this vault generation was DELIBERATELY dropped (clear / TTL), so a live
+        process still holding it in memory drops it too instead of writing it back."""
+        try:
+            with open(self.path + ".cleared", "w", encoding="utf-8") as f:
+                f.write(generation or "")
         except OSError:
             pass
 
+    def _swap_in(self, data: dict | None, reason: str) -> None:
+        """Atomically REPLACE the in-memory map with ``data`` (a snapshot payload, or None for
+        empty). Built first, swapped under the lock: a concurrent reader never sees a
+        half-empty map."""
+        t2r, r2t, counters = {}, {}, {}
+        for tok, real in ((data or {}).get("token_to_real") or {}).items():
+            t2r[tok] = real
+            r2t.setdefault(real, tok)
+        for k, v in ((data or {}).get("counters") or {}).items():
+            try:
+                counters[k] = int(v)
+            except (TypeError, ValueError):
+                pass
+        with self._lock:
+            self._token_to_real, self._real_to_token, self._counters = t2r, r2t, counters
+            self._dirty = False
+            self.generation = (data or {}).get("generation") or uuid.uuid4().hex
+            self._gen_persisted = data is not None
+        self._joff = self._jlines = 0
+        self.events.append(reason)
+
+    def _delete_file(self) -> None:
+        for p in (self.path, self.path + ".bak", self.journal_path):
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except OSError:
+                pass
+
     def clear(self) -> None:
         """Drop the mapping and delete the file (call at session/task end)."""
-        self._real_to_token, self._token_to_real, self._counters = {}, {}, {}
-        self._dirty = False
-        self._delete_file()
+        old_gen = self.generation
+        with self._lock:
+            self._real_to_token, self._token_to_real, self._counters = {}, {}, {}
+            self._dirty = False
+            self.generation = uuid.uuid4().hex
+        self._joff = self._jlines = 0
+        self._seen = None
+        if self.memory_only:
+            return
+        with FileLock(self.path + ".lock"):
+            self._delete_file()
+            self._tombstone(old_gen)
 
-    # ---- override the one mutator so new mappings mark the vault dirty ----
+    # ---------------------------------------------------------------- vault API
     def tokenize(self, real: str, entity_type: str) -> str:
-        before = len(self._token_to_real)
-        token = super().tokenize(real, entity_type)
-        if len(self._token_to_real) != before:
-            self._dirty = True
+        with self._lock:
+            existing = self._real_to_token.get(real)
+        if existing is not None:
+            self._touch()
+            return existing
+        if self.memory_only:
+            base = getattr(self, "_memory_base", None)
+            if base is not None:
+                with self._lock:
+                    self._counters[entity_type] = max(self._counters.get(entity_type, 0), base)
+            return super().tokenize(real, entity_type)
+        # new value: mint under the cross-process lock against the freshest state, write through
+        with FileLock(self.path + ".lock") as fl:
+            if not fl.acquired:
+                self.events.append("vault_lock_timeout")   # proceeding unlocked: audit it
+            self._sync_locked()
+            if self.memory_only:                  # sync just found data we cannot read
+                return super().tokenize(real, entity_type)
+            with self._lock:
+                before = len(self._token_to_real)
+                token = super().tokenize(real, entity_type)
+                minted = len(self._token_to_real) != before
+                n = self._counters.get(entity_type, 0)
+            if minted:
+                self._append(token, real, entity_type, n)
         return token
 
-    # ---- maintenance ----
+    def restore_token(self, token: str) -> str | None:
+        real = super().restore_token(token)
+        if real is not None:
+            self._touch()
+        if real is None and not self.memory_only and _now() - self._last_sync > 0.5:
+            self._last_sync = _now()               # maybe another process minted it
+            if self.sync():
+                real = super().restore_token(token)
+        return real
+
+    # ---------------------------------------------------------------- maintenance
     @staticmethod
     def path_for(directory: str, session_id: str) -> str:
         h = hashlib.sha256((session_id or "default").encode("utf-8")).hexdigest()[:16]
@@ -114,7 +593,8 @@ class DurableVault(Vault):
 
     @staticmethod
     def sweep_expired(directory: str, ttl_seconds: int = DEFAULT_TTL_SECONDS) -> int:
-        """Delete vault files older than TTL. Returns count removed."""
+        """Delete vault files (snapshot, journal, .bak, quarantined copies) older than TTL —
+        a vault is expired only when BOTH its snapshot and journal are older than the TTL."""
         removed = 0
         try:
             p = Path(directory)
@@ -122,6 +602,30 @@ class DurableVault(Vault):
                 return 0
             cutoff = _now() - ttl_seconds
             for f in p.glob("*.json"):
+                group = [f, Path(str(f) + ".journal"), Path(str(f) + ".bak")]
+
+                def _times():
+                    return [g.stat().st_mtime for g in group[:2]
+                            if g.exists() and (g == f or g.stat().st_size > 0)]
+
+                times = _times()
+                if not (times and max(times) < cutoff):
+                    continue
+                with FileLock(str(f) + ".lock") as fl:   # re-check: a live writer may be mid-use
+                    times = _times()
+                    if not fl.acquired or not (times and max(times) < cutoff):
+                        continue
+                    for g in group:
+                        try:
+                            g.unlink()
+                            removed += 1
+                        except OSError:
+                            pass
+                    try:
+                        Path(str(f) + ".cleared").write_text("", encoding="utf-8")
+                    except OSError:
+                        pass
+            for f in p.glob("*.json.corrupt-*"):
                 try:
                     if f.stat().st_mtime < cutoff:
                         f.unlink()

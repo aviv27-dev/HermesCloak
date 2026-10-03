@@ -1,0 +1,171 @@
+name: Telegram sandbox agent
+
+# A throwaway hermes agent on a GitHub runner — Telegram bot + Ollama Cloud model + HermesCloak in
+# ENFORCE mode — online for a fixed window so you can run docs/LIVE-TESTING.md from your phone.
+# SYNTHETIC DATA ONLY: the runner is GitHub's machine (the vault lives there for the run).
+#
+# Start: add the `live-telegram` label to the PR (remove + re-add to start another window).
+# Repository secrets:   TELEGRAM_AGLOGITCLOAK_BOT (bot token from @BotFather — a DEDICATED bot,
+#                       never a production agent's bot), TELEGRAM_ALLOWED_USERS or TELEGRAM_USER_ID (your numeric
+#                       Telegram id, from @userinfobot; comma-separated for several),
+#                       OLLAMA_API_KEY or OLLAMA_TEST_KEY.
+# Repository variables (optional): HC_LIVE_MODEL (default gpt-oss:120b),
+#                       TELEGRAM_SANDBOX_MINUTES (default 30, max 300).
+on:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+jobs:
+  sandbox:
+    if: github.event.label.name == 'live-telegram'
+    concurrency:
+      group: telegram-sandbox          # Telegram allows ONE poller per bot
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_AGLOGITCLOAK_BOT }}
+      TELEGRAM_ALLOWED_USERS: ${{ secrets.TELEGRAM_ALLOWED_USERS || secrets.TELEGRAM_USER_ID }}
+      OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY || secrets.OLLAMA_TEST_KEY }}
+      MODEL: ${{ vars.HC_LIVE_MODEL || 'gpt-oss:120b' }}
+      MINUTES: ${{ vars.TELEGRAM_SANDBOX_MINUTES || '30' }}
+      WORK: ${{ github.workspace }}/../sandbox
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Check secrets
+        run: |
+          missing=""
+          [ -n "$TELEGRAM_BOT_TOKEN" ]     || missing="$missing TELEGRAM_AGLOGITCLOAK_BOT"
+          [ -n "$TELEGRAM_ALLOWED_USERS" ] || missing="$missing TELEGRAM_ALLOWED_USERS/TELEGRAM_USER_ID"
+          [ -n "$OLLAMA_API_KEY" ]         || missing="$missing OLLAMA_API_KEY/OLLAMA_TEST_KEY"
+          if [ -n "$missing" ]; then echo "::error::missing repository secrets:$missing"; exit 1; fi
+          case "$MINUTES" in ''|*[!0-9]*) echo "::error::TELEGRAM_SANDBOX_MINUTES must be a number"; exit 1;; esac
+          [ "$MINUTES" -le 300 ] || { echo "::error::TELEGRAM_SANDBOX_MINUTES max is 300"; exit 1; }
+
+      - name: Resolve model on Ollama Cloud
+        run: |
+          ids=$(curl -sf -H "Authorization: Bearer $OLLAMA_API_KEY" https://ollama.com/v1/models \
+                | python3 -c "import json,sys; print('\n'.join(sorted(m['id'] for m in json.load(sys.stdin)['data'])))") || true
+          echo "Available models:"; echo "$ids" | sed 's/^/  /'
+          if [ -n "$ids" ] && ! echo "$ids" | grep -qxF "$MODEL"; then
+            echo "::error::model '$MODEL' is not offered by Ollama Cloud — set the repository variable HC_LIVE_MODEL to one of the names above"
+            exit 1
+          fi
+      - name: Install hermes-agent + HermesCloak
+        run: |
+          SANDBOX_INSTALL_ONLY=1 bash install/live_sandbox.sh
+          VIRTUAL_ENV="$WORK/venv" uv pip install -q "python-telegram-bot[webhooks]==22.8"   # hermes [telegram] extra
+
+      - name: Configure the sandbox agent
+        run: |
+          export HERMES_HOME="$RUNNER_TEMP/hermes-home"
+          echo "HERMES_HOME=$HERMES_HOME" >> "$GITHUB_ENV"
+          mkdir -p "$HERMES_HOME/cloak"
+          # the agent works in a folder of FICTIONAL court decisions (tests/fixtures/verdicts)
+          CASES="$RUNNER_TEMP/cases"
+          cp -r tests/fixtures/verdicts/cases "$CASES"
+          cat > "$HERMES_HOME/config.yaml" <<YAML
+          model:
+            default: "$MODEL"
+            provider: "ollama-cloud"
+          terminal:
+            cwd: "$CASES"
+          plugins:
+            enabled: [hermescloak]
+          platforms:
+            telegram:
+              extra:
+                drop_pending_on_cold_boot: false
+          YAML
+          echo enforce > "$HERMES_HOME/cloak/MODE"
+          { cat tests/fixtures/verdicts/gazetteer.txt; printf 'ישראל ישראלי\tלקוח\nדנה בדיקה\tלקוח\n'; } \
+            > "$HERMES_HOME/cloak/gazetteer.txt"
+          cp profiles/example.yaml "$HERMES_HOME/cloak/profile.yaml"
+          "$WORK/venv/bin/python" install/apply_hooks.py --verify --hermes-root "$WORK/hermes-agent" | grep -v "^  \[info\]"
+
+      - name: Run the gateway for the window (model traffic recorded locally)
+        run: |
+          # every model-bound request passes through a local recorder → leak scan afterwards
+          python3 install/outbound_recorder.py --upstream https://ollama.com/v1 --port 8790 \
+            --log "$RUNNER_TEMP/outbound.jsonl" &
+          export OLLAMA_BASE_URL=http://127.0.0.1:8790/v1
+          LOG="$RUNNER_TEMP/gateway.log"
+          ( cd "$WORK/hermes-agent" && timeout --signal=INT --kill-after=60 "${MINUTES}m" \
+              "$WORK/venv/bin/hermes" gateway run -v --no-supervise > "$LOG" 2>&1 ) &
+          GW=$!
+          # announce only once the bot is really listening (messages sent earlier were dropped)
+          for i in $(seq 1 180); do
+            grep -q "Gateway running with" "$LOG" 2>/dev/null && break
+            kill -0 $GW 2>/dev/null || break
+            sleep 1
+          done
+          if grep -q "Gateway running with" "$LOG"; then
+            echo "gateway ready after ${i}s"
+            ANNOUNCE=1
+          else
+            echo "::error::gateway did not come up"; ANNOUNCE=0
+          fi
+          if [ "$ANNOUNCE" = 1 ]; then
+            for id in ${TELEGRAM_ALLOWED_USERS//,/ }; do
+              curl -s -o /dev/null "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                --data-urlencode "chat_id=$id" \
+                --data-urlencode "text=🧪 HermesCloak sandbox online for ${MINUTES} min (model ${MODEL}, MODE=enforce).
+          יש לי 6 תיקים בדויים (פסקי דין) — כל מה שנשלח למודל עובר דרך HermesCloak ונבדק בסוף.
+          נסה למשל:
+          • אילו תיקים יש לך?
+          • מי הצדדים בתיק 2 ומה מספרי הטלפון שלהם?
+          • סכם את פסק הדין בתיק 3, כולל הכתובות והגוש והחלקה
+          • מה מספר החשבון והרכב שעוקלו בתיק 4?
+          • למי שולח פסק הדין בדוא\"ל בתיק 1?
+          (התשובה הראשונה איטית יותר — המתן לה לפני ההודעה הבאה)" || true
+            done
+          fi
+          wait $GW || code=$?
+          echo "gateway exited (${code:-0}; 124 = window ended)"
+          # gateway.log is NOT uploaded/printed (it holds the conversation) — stage COUNTS only:
+          c() { grep -cE "$1" "$LOG" 2>/dev/null || true; }
+          echo "diagnostics: connected=$(c 'Connected to Telegram') inbound_batches=$(c 'Flushing text batch') \
+          dropped_cold_boot=$(c 'Cold boot: dropping') queued_at_start=$(c 'Queued inbound message') \
+          errors=$(c ' ERROR ') tracebacks=$(c 'Traceback')"
+          echo "model-bound requests recorded: $(wc -l < "$RUNNER_TEMP/outbound.jsonl" 2>/dev/null || echo 0)"
+
+      - name: Health summary
+        if: always()
+        run: |
+          [ -n "$HERMES_HOME" ] || exit 0
+          "$WORK/venv/bin/python" install/apply_hooks.py --verify --strict --hermes-root "$WORK/hermes-agent" || true
+          cp "$HERMES_HOME/cloak/audit.log"* "$RUNNER_TEMP/" 2>/dev/null || true
+
+      - name: Leak scan — did any case detail reach the model in clear?
+        if: always()
+        run: |
+          [ -n "$HERMES_HOME" ] || exit 0
+          # counts per type only; the recorded traffic itself is never printed or uploaded
+          "$WORK/venv/bin/python" install/leak_scan.py --manifest tests/fixtures/verdicts/manifest.json \
+            --log "$RUNNER_TEMP/outbound.jsonl" --hermes-home "$HERMES_HOME" | tee "$RUNNER_TEMP/leak_scan.txt"
+
+      - name: Upload audit log (counts/types only — no real values)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hermescloak-audit
+          path: |
+            ${{ runner.temp }}/audit.log*
+            ${{ runner.temp }}/leak_scan.txt
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Sign off
+        if: always()
+        run: |
+          for id in ${TELEGRAM_ALLOWED_USERS//,/ }; do
+            curl -s -o /dev/null "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              --data-urlencode "chat_id=$id" \
+              --data-urlencode "text=🧪 HermesCloak sandbox is offline.
+          $(tail -n 1 "$RUNNER_TEMP/leak_scan.txt" 2>/dev/null || echo 'leak scan: n/a')" || true
+          done

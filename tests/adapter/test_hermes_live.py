@@ -94,6 +94,6 @@ def test_stream_delta_noop_when_off(tmp_path, monkeypatch):
 
 def test_enforce_failopen_on_engine_error(tmp_path, monkeypatch):
     _setup(tmp_path, monkeypatch, "enforce")
-    monkeypatch.setattr(live, "_engine_for", lambda agent: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(live, "_engine_for_session", lambda sid: (_ for _ in ()).throw(RuntimeError("boom")))
     msgs = [{"role": "user", "content": "שירה לוי"}]
     assert live.cloak_sanitize_outbound(_FakeAgent("s1"), msgs) is msgs   # fail-open -> original

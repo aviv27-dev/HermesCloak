@@ -1,86 +1,41 @@
 # Surviving hermes-agent version updates
 
-HermesCloak wires into hermes-agent by inserting three small seams into the agent source
-(see [INTEGRATION.md](INTEGRATION.md)). **A hermes-agent update rewrites those files**, which
-silently removes the seams — the agent keeps running, but tokenization stops and PII flows to the
-cloud again, with no error. So treat re-applying the seams as a required post-update step.
+## Since HermesCloak 0.2 — plugin install (current hermes-agent)
 
-## The risk in one line
-
-After `hermes-agent` updates, the privacy layer can be **silently gone**. Always re-verify.
-
-## Procedure for every hermes-agent update
+HermesCloak is a hermes **plugin** now ([INTEGRATION.md](INTEGRATION.md)): it modifies no hermes
+file, so a hermes update no longer strips it. What an update *can* still do is move one of the
+internal points the plugin hooks. That never breaks hermes (every hook is guarded), but coverage
+would drop — so after each update:
 
 ```bash
-# 1. update hermes-agent as usual (the seams are now likely gone)
-
-# 2. re-verify — authoritative present/missing check
-python install/apply_hooks.py --verify --hermes-root $HERMES_HOME/hermes-agent
-
-# 3. if anything is MISSING, re-apply (idempotent — skips seams already present)
-python install/apply_hooks.py --apply --hermes-root $HERMES_HOME/hermes-agent
-#    if an anchor moved in the new version, --apply prints the exact block to paste manually
-#    (and `--print` shows all three blocks + their target locations)
-
-# 4. re-verify until all three show OK
-python install/apply_hooks.py --verify --hermes-root $HERMES_HOME/hermes-agent
-
-# 5. restart the gateway so the agent process loads the patched files
-#    (this is the ONLY step that interrupts live sessions — schedule it)
-
-# 6. confirm it is actually filtering, on a real turn:
-tail $HERMES_HOME/cloak/audit.log
-#    look for fresh enforce_send with "real_values_in_outbound": 0
+python install/apply_hooks.py --verify --hermes-root /path/to/hermes-agent   # static check, exit 1 = act
+/path/to/hermes-venv/bin/python install/e2e_check.py --hermes-root /path/to/hermes-agent   # live proof
+grep -E 'plugin_active|seam_missing' $HERMES_HOME/cloak/audit.log | tail -2  # after the gateway restart
 ```
 
-## Make it automatic (recommended)
+Also re-run `pip install -e /path/to/HermesCloak` if the update recreated hermes' virtualenv
+(`--verify` reports `hermescloak not importable` in that case).
 
-Add the verify step to whatever you use to update hermes-agent, so a missing seam fails loudly
-instead of silently:
-
-```bash
-hermes-agent-update.sh && \
-  python /path/to/HermesCloak/install/apply_hooks.py --apply  --hermes-root $HERMES_HOME/hermes-agent && \
-  python /path/to/HermesCloak/install/apply_hooks.py --verify --hermes-root $HERMES_HOME/hermes-agent || \
-  echo "‼ HermesCloak seams missing after update — privacy layer is OFF until fixed"
-```
-
-**Best for a systemd-managed gateway (fully automatic, no reminders).** Add an `ExecStartPre` to the
-gateway unit so the seams are re-applied *before every start* — and since a gateway restart always
-follows an update, this restores the privacy layer with nobody having to remember:
+The existing automation keeps working unchanged — `apply_hooks.py --apply` now just (re-)enables
+the plugin and is idempotent:
 
 ```ini
 # /etc/systemd/system/<gateway>.service.d/42-cloak-reapply.conf
 [Service]
-ExecStartPre=-/usr/bin/python3 /path/to/HermesCloak/install/apply_hooks.py --apply --hermes-root /path/to/hermes-agent
+ExecStartPre=-/path/to/hermes-venv/bin/python /path/to/HermesCloak/install/apply_hooks.py --apply
 ```
 
-Then `systemctl daemon-reload`. The leading `-` makes it non-fatal (the gateway still starts if it
-errors — fail-open, consistent with the seams). `--apply` is idempotent, so it's a no-op when the
-seams are already present, and it re-applies all three (including the wrap-style streaming seam).
+### Migrating from the 0.1 source seams
 
-**For a plain git checkout.** A `post-merge` hook re-applies right after the update pulls:
+The old seams anchored on code that no longer exists in hermes-agent (`build_api_kwargs`
+docstring, `assistant_message = normalized`, `agent.stream_delta_callback = _stream_delta_cb`), so
+on current hermes they cannot be applied and **the privacy layer has been off since that update**.
+Steps: install the package into hermes' venv → `hermes plugins enable hermescloak` → restart the
+gateway → check `plugin_active` in the audit log. Leftover seams from an old checkout are harmless
+(restore is idempotent) and disappear on the next hermes update.
 
-```sh
-# hermes-agent/.git/hooks/post-merge   (chmod +x)
-#!/bin/sh
-ROOT="$(git rev-parse --show-toplevel)"
-python /path/to/HermesCloak/install/apply_hooks.py --apply  --hermes-root "$ROOT"
-python /path/to/HermesCloak/install/apply_hooks.py --verify --hermes-root "$ROOT"
-```
+## If you can't verify right now
 
-A periodic `--verify` (cron) that alerts on a non-zero exit is a cheap safety net between updates.
-
-## If you can't re-apply right now
-
-`echo off > $HERMES_HOME/cloak/MODE` is harmless when the seams are gone (there's nothing to turn
-off), but the meaningful state is: **seams present + MODE=enforce = protected; seams missing =
-unprotected**. If an update lands and you can't re-apply immediately, assume unprotected and avoid
-sending sensitive matters through that agent until `--verify` is green again.
-
-## Why updates clobber it (and why there's no cleaner hook)
-
-hermes-agent ships no plugin/extension point at these code paths, and its codex transport is
-non-standard streaming (so an external proxy can't wrap it). In-source seams are currently the
-only integration; the cost is this re-apply-after-update step. If a future hermes-agent exposes a
-stable hook API, prefer it over source insertion.
+`echo off > $HERMES_HOME/cloak/MODE` is the kill switch. The meaningful state is: **plugin enabled
++ `--verify` green + MODE=enforce = protected**; anything else = assume unprotected and avoid
+sending sensitive matters through that agent until it is green again.

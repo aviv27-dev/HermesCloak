@@ -1,0 +1,51 @@
+name: Live model check
+
+# Real hermes-agent + HermesCloak against a real model (default Ollama Cloud), synthetic data only.
+# Start it by adding the `live-test` label to a PR (remove + re-add to run again), or (once merged
+# to main) from the Actions tab.
+# Needs the repository secret OLLAMA_API_KEY (or OLLAMA_TEST_KEY).
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "Model name at the endpoint"
+        default: "gpt-oss:120b"
+  pull_request:
+    types: [labeled]                # pushes never start (or cancel) a live run
+
+permissions:
+  contents: read
+
+jobs:
+  live:
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'live-test'
+    # job-level: a run skipped for another label never cancels a live run in progress
+    concurrency:
+      group: live-${{ github.ref }}
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY || secrets.OLLAMA_TEST_KEY }}
+      HC_LIVE_MODEL: ${{ inputs.model || vars.HC_LIVE_MODEL || 'gpt-oss:120b' }}
+      MODEL: ${{ inputs.model || vars.HC_LIVE_MODEL || 'gpt-oss:120b' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Check secret
+        run: |
+          if [ -z "$OLLAMA_API_KEY" ]; then
+            echo "::error::Repository secret OLLAMA_API_KEY (or OLLAMA_TEST_KEY) is not set (Settings → Secrets and variables → Actions)"
+            exit 1
+          fi
+      - name: Resolve model on Ollama Cloud
+        run: |
+          ids=$(curl -sf -H "Authorization: Bearer $OLLAMA_API_KEY" https://ollama.com/v1/models \
+                | python3 -c "import json,sys; print('\n'.join(sorted(m['id'] for m in json.load(sys.stdin)['data'])))") || true
+          echo "Available models:"; echo "$ids" | sed 's/^/  /'
+          if [ -n "$ids" ] && ! echo "$ids" | grep -qxF "$MODEL"; then
+            echo "::error::model '$MODEL' is not offered by Ollama Cloud — set the repository variable HC_LIVE_MODEL to one of the names above"
+            exit 1
+          fi
+      - name: Live sandbox (offline e2e + real model)
+        run: bash install/live_sandbox.sh

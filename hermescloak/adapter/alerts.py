@@ -4,6 +4,7 @@ Per project decision: DURING a turn the guard is silent (it only buffers events)
 AFTER the turn `CloakGuard.flush_alerts()` dispatches them to every configured sink.
 A local audit log is always written; a Telegram sink is the deferred user alert."""
 import json
+import time
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -38,7 +39,8 @@ class FileAuditAlerter:
     def send(self, event: AlertEvent) -> None:
         with open(self._path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(
-                {"kind": event.kind, "session_id": event.session_id, "detail": event.detail},
+                {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "kind": event.kind,
+                 "session_id": event.session_id, "detail": event.detail},
                 ensure_ascii=False) + "\n")
 
 
