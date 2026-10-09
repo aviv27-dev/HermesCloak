@@ -36,3 +36,22 @@ and uses the following model, which carries an ATTRIBUTION requirement:
             archivePrefix={arXiv},
             primaryClass={cs.CL}
       }
+
+--------------------------------------------------------------------------------
+Acknowledgements (design inspiration — no third-party code is included)
+--------------------------------------------------------------------------------
+
+Some techniques in HermesCloak were informed by studying other open-source PII
+pseudonymization projects. No code from them is vendored or copied; the
+implementations here are independent.
+
+  * veil (veil-pii) — Anton Soloviev — MIT License
+    https://github.com/antonsoo/veil
+    Ideas: replaying the model's own turns verbatim (replay cache), tolerant
+    restore of lightly rewritten placeholders, auditing model output for
+    leaked / newly introduced PII, optional vault encryption at rest.
+
+  * LLM Guard — Protect AI — MIT License
+    https://github.com/protectai/llm-guard
+    Ideas: vault-based anonymize/deanonymize lifecycle, configurable matching
+    strategies for restoring placeholders.

@@ -59,13 +59,26 @@ if report.leftover:                               # fail-safe signal (see "Hones
 ## Detection
 
 - **Deterministic (language-independent):** Israeli national ID (*Teudat Zehut*, with check-digit),
-  phone, email, credit card (Luhn), case/docket numbers, land-registry parcel (*Gush*/*Helka*).
+  phone, email, credit card (Luhn), case/docket numbers, land-registry parcel (*Gush*/*Helka*),
+  and credentials (OpenAI/Anthropic/AWS/GitHub/Slack/Google/Stripe/Telegram keys, JWTs, private
+  keys, `password=…` values).
 - **Gazetteer:** order-independent (surname-first vs given-first) + proclitic-aware (handles glued
   one-letter Hebrew prefixes, e.g. *ל/ב/ו* attached to a name). Fed by a pluggable `EntitySource`
   (file / callable / your own DB adapter).
 - **NER (optional `[ner]` extra):** Hebrew personal-name detection via DictaBERT-NER (lazy-loaded;
   runs as a separate shared service, not in-process). English NER is on the roadmap, not yet wired.
   Not required for the core.
+- **Israeli phones in any spelling:** `+972 (0)54-776-5611`, `972-54-7765611`, `054.776.5611`, `00972-3-…`
+  are normalized to one national number and validated (mobile/VoIP 9 digits, landline 8) before masking;
+  dates, amounts and case numbers never match. A labelled ת"ז written with its leading zeros dropped
+  (`ת.ז. 0000018`) is padded and check-digit-tested.
+- **Institutional mail stays readable:** addresses at `gov.il`, `muni.il`, `knesset.il`, `idf.il`
+  (configurable, suffix match) are not personal data — a court's automated sender keeps its name.
+- **Optional second opinion on the masked request** (`jev_check`): TypeSafe's Jev, a typed-decision
+  model, is asked whether a private person's name / contact / identifier is still in clear in the text
+  *as it leaves* (tokens, not values) — the gaps regexes and a client list cannot close. Off by default;
+  the same door serves the office's own locally hosted decision model (`decide_backend: local`), with
+  shadow mode and per-use calibration to earn the switch.
 - **Never-mask allowlist** (e.g. court/authority names) and an over-mask bias for *names* (a leaked
   identity is the catastrophic failure). Numeric detectors are precise to avoid shredding data dumps.
 - **Neutral typing for ambiguous IDs:** a bare 9-digit number (an Israeli national ID and a company
@@ -78,21 +91,30 @@ or spaCy; recognizers are built in. The optional Hebrew NER pulls `transformers`
 
 ## Use it with hermes-agent
 
-HermesCloak wires into a hermes-agent checkout via three small, fail-open seams (it has no plugin
-API). Everything that identifies a deployment (profile, name gazetteer, MODE) lives under
-`$HERMES_HOME/cloak/` — never in this repo.
-
-- **[docs/INTEGRATION.md](docs/INTEGRATION.md)** — install the package, configure
-  `$HERMES_HOME/cloak/`, install the three seams (`install/apply_hooks.py`), verify via the audit log.
-- **[docs/AGENT-PROMPT.md](docs/AGENT-PROMPT.md)** — the automatic cloud-model token instruction +
-  an optional system-prompt note so the agent doesn't defeat or exfiltrate around the filter.
-- **[docs/UPGRADING.md](docs/UPGRADING.md)** — **a hermes-agent update overwrites the seams**; how to
-  re-apply + verify after every update so the privacy layer never goes silently off.
+HermesCloak loads as a **hermes-agent plugin** — it modifies no hermes file, so hermes updates no
+longer silently remove it. Everything that identifies a deployment (profile, name gazetteer, MODE)
+lives under `$HERMES_HOME/cloak/` — never in this repo.
 
 ```bash
-python install/apply_hooks.py --apply  --hermes-root /path/to/hermes-agent
+/path/to/hermes-venv/bin/pip install -e /path/to/HermesCloak
+hermes plugins enable hermescloak            # or: python install/apply_hooks.py --apply
 python install/apply_hooks.py --verify --hermes-root /path/to/hermes-agent
 ```
+
+- **[docs/INTEGRATION.md](docs/INTEGRATION.md)** — install, configure `$HERMES_HOME/cloak/`, what is
+  intercepted (outbound middleware, inbound, streaming, auxiliary calls), verification, known gaps.
+- **[docs/AGENT-PROMPT.md](docs/AGENT-PROMPT.md)** — the automatic cloud-model token instruction +
+  an optional system-prompt note so the agent doesn't defeat or exfiltrate around the filter.
+- **[docs/UPGRADING.md](docs/UPGRADING.md)** — what to check after a hermes update, and migrating from
+  the old source-patch install (which current hermes-agent no longer supports).
+- **[docs/LIVE-TESTING.md](docs/LIVE-TESTING.md)** — an acceptance protocol (synthetic data) for a
+  running agent: shadow → enforce → tools → replay → secrets → health.
+
+Built to survive failures: a crash-safe, cross-process token vault (write-ahead journal, locked
+minting, backups, optional encryption at rest), self-healing config, a NER circuit breaker,
+byte-identical replay of the model's own turns, tolerant restore of mangled tokens, an output
+audit for PII the model introduced, and official-API backstops — see
+[INTEGRATION.md § Reliability](docs/INTEGRATION.md#4-reliability--what-survives-what).
 
 ## Try it — browser demo
 

@@ -1,85 +1,61 @@
 #!/usr/bin/env python3
-"""Install / verify the HermesCloak seams in a hermes-agent checkout.
+"""Enable / verify HermesCloak in hermes-agent.
 
-hermes-agent has no plugin system, so HermesCloak is wired by inserting three tiny,
-fail-open call-sites ("seams") into the agent source. A hermes-agent **version update
-overwrites those files** — so after every update you re-run this to re-apply + verify.
+HermesCloak used to be wired by inserting three source "seams" into the hermes-agent checkout,
+which every hermes update overwrote (and which current hermes-agent no longer even has anchors
+for). Current hermes-agent has a plugin system, so HermesCloak now ships as a plugin
+(``hermescloak.hermes_plugin``, pip entry point ``hermes_agent.plugins: hermescloak``) and this
+script no longer edits any hermes file. The command line is unchanged, so existing systemd
+``ExecStartPre`` lines and git ``post-merge`` hooks keep working.
 
 Usage:
-  python install/apply_hooks.py --verify                 # report which seams are present
-  python install/apply_hooks.py --apply                  # insert missing seams (idempotent)
-  python install/apply_hooks.py --print                  # print the blocks for manual paste
-  python install/apply_hooks.py --apply --hermes-root /path/to/hermes-agent
+  python install/apply_hooks.py --apply  [--hermes-root PATH]   # enable the plugin (idempotent)
+  python install/apply_hooks.py --verify [--hermes-root PATH]   # exit 1 if not protected
+  python install/apply_hooks.py --print                         # show what --apply does
 
-Default hermes root: $HERMES_AGENT_ROOT, else $HERMES_HOME/hermes-agent, else ./hermes-agent.
-
-Each seam is guarded by `try/except: pass`, so even a wrong/edited insertion can never
-raise into the agent. `--verify` is the authoritative check (substring of a stable
-sentinel). `--apply` is best-effort anchor insertion; if an anchor is not found (e.g. a
-future hermes refactor moved it), it prints the block + location for a 30-second manual paste.
-The streaming seam (C) is wrap-style (it replaces the stream_delta_callback assignment); it
-auto-applies by anchoring on that line, and only falls back to manual-print if a refactor
-renames the anchor.
-
-Automate it so an update never silently drops the privacy layer (see docs/UPGRADING.md):
-  * systemd: add `ExecStartPre=-python install/apply_hooks.py --apply --hermes-root <ROOT>` to the
-    gateway unit — re-applies on every start (a restart always follows an update). Non-fatal.
-  * git: a `post-merge` hook in the hermes-agent checkout that runs `--apply --verify`.
+--apply   runs ``hermes plugins enable hermescloak`` when the ``hermes`` CLI is on PATH, else adds
+          ``hermescloak`` to ``plugins.enabled`` in ``$HERMES_HOME/config.yaml`` itself.
+--verify  checks (1) the plugin is enabled (and not disabled) in config.yaml, (2) MODE, and
+          (3) with --hermes-root: that every hermes interception point the plugin needs still
+          exists in that checkout — run it after each hermes update; a refactor there is reported
+          as MISSING instead of silently reducing coverage.
 """
 import argparse
+import glob
+import json
 import os
+import re
+import time
+import shutil
+import subprocess
 import sys
 
-SENTINEL = "HermesCloak:"
+PLUGIN = "hermescloak"
 
-# Seam A — OUTBOUND tokenize. Simple insert right after the build_api_kwargs docstring.
-A_FILE = "agent/chat_completion_helpers.py"
-A_ANCHOR = '    """Build the keyword arguments dict for the active API mode."""'
-A_BLOCK = '''    try:  # HermesCloak: tokenize a COPY of outbound messages before the cloud (MODE-scoped, fail-open)
-        from hermescloak.adapter.hermes_live import cloak_sanitize_outbound
-        api_messages = cloak_sanitize_outbound(agent, api_messages)
-    except Exception:
-        pass'''
-
-# Seam B — INBOUND restore. Insert after the transport-agnostic assistant-message convergence.
-B_FILE = "agent/conversation_loop.py"
-B_ANCHOR = "            assistant_message = normalized"
-B_BLOCK = '''            try:  # HermesCloak: restore real values (content + tool-call args) — codex-safe convergence
-                from hermescloak.adapter.hermes_live import cloak_restore_inbound
-                assistant_message = cloak_restore_inbound(agent, assistant_message)
-            except Exception:
-                pass'''
-
-# Seam C — STREAMING last-mile restore. WRAP-style: replaces the stream_delta_callback
-# assignment with a version that filters ⟦tokens⟧ out of streamed deltas. Auto: anchors on the
-# assignment line and wraps it (idempotent). Falls back to manual-print if a future hermes
-# refactor renames the anchor (verify stays authoritative).
-C_FILE = "gateway/run.py"
-C_ANCHOR = "            agent.stream_delta_callback = _stream_delta_cb"
-C_BLOCK = '''            # HermesCloak: restore ⟦tokens⟧ in streamed deltas before they reach the gateway
-            # consumer, so the user-facing reply shows real values (enforce-only, fail-open).
-            if _stream_delta_cb is not None:
-                try:
-                    from hermescloak.adapter.hermes_live import cloak_filter_stream_delta as _cloak_sd
-                    _cloak_sd_state = {}
-                    def _cloak_stream_delta_cb(_t, __cb=_stream_delta_cb, __ag=agent, __st=_cloak_sd_state):
-                        _out = _cloak_sd(__ag, __st, _t)
-                        if _out:
-                            __cb(_out)
-                    agent.stream_delta_callback = _cloak_stream_delta_cb
-                except Exception:
-                    agent.stream_delta_callback = _stream_delta_cb
-            else:
-                agent.stream_delta_callback = _stream_delta_cb'''
-
-SEAMS = [
-    {"name": "A outbound (chat_completion_helpers)", "file": A_FILE, "anchor": A_ANCHOR,
-     "block": A_BLOCK, "auto": True, "after": True},
-    {"name": "B inbound  (conversation_loop)", "file": B_FILE, "anchor": B_ANCHOR,
-     "block": B_BLOCK, "auto": True, "after": True},
-    {"name": "C stream   (gateway/run)", "file": C_FILE, "anchor": C_ANCHOR,
-     "block": C_BLOCK, "auto": True, "wrap": True},
+# (description, file relative to the hermes root, regex that must match) — the targets
+# hermescloak/hermes_plugin depends on.
+TARGETS = [
+    ("outbound: llm_request middleware is applied",
+     "agent/turn_api_request.py", r"apply_llm_request_middleware\("),
+    ("outbound: middleware API",
+     "hermes_cli/middleware.py", r'LLM_REQUEST_MIDDLEWARE\s*=\s*"llm_request"'),
+    ("inbound: transport registry",
+     "agent/transports/__init__.py", r"def register_transport\(|_REGISTRY"),
+    ("inbound: NormalizedResponse",
+     "agent/transports/types.py", r"class NormalizedResponse"),
+    ("streaming: _fire_stream_delta",
+     "agent/stream_delivery.py", r"def _fire_stream_delta\("),
+    ("streaming: _emit_stream_end",
+     "agent/stream_delivery.py", r"def _emit_stream_end\("),
+    ("auxiliary: sync completion funnel",
+     "agent/auxiliary_client.py", r"def _relay_sync_completion\("),
+    ("auxiliary: async completion funnel",
+     "agent/auxiliary_client.py", r"async def _relay_async_completion\("),
 ]
+
+
+def hermes_home():
+    return os.path.realpath(os.path.expanduser(os.environ.get("HERMES_HOME") or "~/.hermes"))
 
 
 def hermes_root(cli):
@@ -90,83 +66,257 @@ def hermes_root(cli):
             or os.path.join(os.getcwd(), "hermes-agent"))
 
 
+def _config_path():
+    return os.path.join(hermes_home(), "config.yaml")
+
+
+def _load_config():
+    p = _config_path()
+    if not os.path.exists(p):
+        return {}
+    import yaml
+    with open(p, encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+def _plugin_lists(cfg):
+    plugins = cfg.get("plugins") or {}
+    en = plugins.get("enabled")
+    dis = plugins.get("disabled")
+    return (en if isinstance(en, list) else None), (dis if isinstance(dis, list) else [])
+
+
+def _enable_in_config():
+    """Fallback when the hermes CLI is unavailable: add to plugins.enabled (keeps other keys;
+    note PyYAML drops comments — prefer `hermes plugins enable`)."""
+    import yaml
+    cfg = _load_config()
+    plugins = cfg.setdefault("plugins", {}) or {}
+    cfg["plugins"] = plugins
+    enabled = plugins.get("enabled") if isinstance(plugins.get("enabled"), list) else []
+    if PLUGIN not in enabled:
+        enabled.append(PLUGIN)
+    plugins["enabled"] = enabled
+    if isinstance(plugins.get("disabled"), list) and PLUGIN in plugins["disabled"]:
+        plugins["disabled"].remove(PLUGIN)
+    os.makedirs(hermes_home(), exist_ok=True)
+    with open(_config_path(), "w", encoding="utf-8") as f:
+        yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)
+
+
+def apply(dry):
+    en, dis = _plugin_lists(_load_config())
+    if en and PLUGIN in en and PLUGIN not in dis:
+        print(f"  = already enabled in {_config_path()}")
+        return 0
+    hermes = shutil.which("hermes")
+    if dry:
+        print(f"  [dry-run] would run `hermes plugins enable {PLUGIN}`" if hermes
+              else f"  [dry-run] would add {PLUGIN} to plugins.enabled in {_config_path()}")
+        return 0
+    if hermes:
+        r = subprocess.run([hermes, "plugins", "enable", PLUGIN], stdin=subprocess.DEVNULL)
+        if r.returncode == 0:
+            print(f"  ✓ enabled via `hermes plugins enable {PLUGIN}`")
+            return 0
+        print(f"  ! `hermes plugins enable` failed (exit {r.returncode}); editing config.yaml directly")
+    _enable_in_config()
+    print(f"  ✓ added {PLUGIN} to plugins.enabled in {_config_path()}")
+    print("  Restart the gateway so the agent process loads the plugin.")
+    return 0
+
+
 def _read(path):
     with open(path, encoding="utf-8") as f:
         return f.read()
 
 
-def verify(root):
-    print(f"hermes-agent root: {root}\n--- HermesCloak seam verification ---")
+INCIDENTS = ("seam_missing", "unfiltered_sent", "blocked_send", "leftover_token", "restore_error",
+             "leaked_original", "config_error", "vault_locked", "vault_key_invalid", "vault_key_unreadable",
+             "vault_crypto_unavailable", "vault_write_failed", "vault_corrupt_quarantined",
+             "vault_lock_timeout", "vault_error", "ner_down")
+INFO = ("new_pii", "backstop_restore", "vault_restored_from_backup", "vault_journal_lines_skipped")
+
+
+def _ts(rec):
+    try:
+        return time.mktime(time.strptime(rec["ts"][:19], "%Y-%m-%dT%H:%M:%S"))
+    except Exception:
+        return None
+
+
+def audit_summary(hours=24.0):
+    """(last plugin_active record, {kind: count} within `hours`) from the audit log (+ rotations)."""
+    cloak = os.path.join(hermes_home(), "cloak")
+    files = sorted(glob.glob(os.path.join(cloak, "audit.log*")), reverse=True)
+    last_active, counts = None, {}
+    cutoff = time.time() - hours * 3600
+    for f in files:
+        try:
+            lines = open(f, encoding="utf-8").read().splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if rec.get("kind") == "plugin_active":
+                last_active = rec
+            t = _ts(rec)
+            if t is not None and t >= cutoff:
+                counts[rec.get("kind")] = counts.get(rec.get("kind"), 0) + 1
+    return last_active, counts
+
+
+def last_masked_summary():
+    """The latest enforce_send event's counts: ``in_request`` / ``in_system_prompt`` (that turn)
+    and ``entities`` (cumulative distinct values in the vault)."""
+    path = os.path.join(hermes_home(), "cloak", "audit.log")
+    last = None
+    try:
+        for line in open(path, encoding="utf-8"):
+            if '"enforce_send"' in line:
+                last = line
+        detail = json.loads(json.loads(last)["detail"]) if last else {}
+        return detail if isinstance(detail, dict) else {}
+    except Exception:
+        return {}
+
+
+def vault_status():
+    out = []
+    try:
+        from hermescloak.durable_vault import MAGIC, read_journal, read_payload
+        from hermescloak.adapter.hermes_live import _vault_key
+    except Exception as exc:
+        return [f"cannot inspect vault ({exc!r})"]
+    os.environ.setdefault("HERMES_HOME", hermes_home())
+    key = _vault_key()
+    for f in sorted(glob.glob(os.path.join(hermes_home(), "cloak", "vaults", "*.json"))):
+        enc = open(f, "rb").read(len(MAGIC)) == MAGIC
+        try:
+            n = len(read_payload(f, key).get("token_to_real") or {})
+            j = len(read_journal(f + ".journal", key)[0])
+            out.append(f"{os.path.basename(f)}: {n} snapshot + {j} journal entries, "
+                       f"{'ENCRYPTED' if enc else 'plaintext (0600)'}")
+        except Exception as exc:
+            out.append(f"{os.path.basename(f)}: UNREADABLE ({type(exc).__name__}) "
+                       f"{'— encrypted, key not available here' if enc else ''}")
+    return out or ["no vault yet (created on the first tokenized value)"]
+
+
+def verify(root, strict=False):
     ok = True
-    for s in SEAMS:
-        p = os.path.join(root, s["file"])
-        present = os.path.exists(p) and SENTINEL in _read(p) and s["block"].split("\n")[0].strip()[:30] in _read(p)
-        # robust check: sentinel + the seam-specific import symbol
-        sym = "cloak_sanitize_outbound" if "A " in s["name"] else "cloak_restore_inbound" if "B " in s["name"] else "cloak_filter_stream_delta"
-        present = os.path.exists(p) and sym in _read(p)
-        print(f"  [{'OK ' if present else 'MISSING'}] {s['name']}  ({s['file']})")
-        ok = ok and present
-    print("--- " + ("all seams present ✓" if ok else "SOME SEAMS MISSING — run --apply or --print") + " ---")
+    print(f"HERMES_HOME: {hermes_home()}\n--- HermesCloak verification ---")
+    cfg = _load_config()
+    en, dis = _plugin_lists(cfg)
+    enabled = bool(en) and PLUGIN in en and PLUGIN not in dis
+    print(f"  [{'OK ' if enabled else 'MISSING'}] plugin enabled in config.yaml (plugins.enabled)")
+    ok &= enabled
+    runtime = str(((cfg.get("model") or {}) if isinstance(cfg.get("model"), dict) else {})
+                  .get("openai_runtime") or "auto").strip().lower()
+    if runtime == "codex_app_server":
+        print("  [WARN] model.openai_runtime: codex_app_server — turns are handed to the codex subprocess, "
+              "which talks to OpenAI directly: HermesCloak does NOT cover that path. "
+              "Switch it off (`/codex-runtime auto`) for a protected agent.")
+        if strict:
+            ok = False
+    try:
+        import hermescloak.hermes_plugin  # noqa: F401
+        print("  [OK ] hermescloak importable by this python")
+    except Exception as exc:
+        print(f"  [MISSING] hermescloak not importable by this python ({exc!r}) — "
+              "pip install it into the hermes venv")
+        ok = False
+    try:
+        mode = open(os.path.join(hermes_home(), "cloak", "MODE"), encoding="utf-8").read().strip()
+    except OSError:
+        mode = "off (no cloak/MODE)"
+    print(f"  [info] MODE = {mode}")
+    if root and os.path.isdir(root):
+        print(f"--- interception points in {root} ---")
+        for desc, rel, pat in TARGETS:
+            p = os.path.join(root, rel)
+            present = os.path.exists(p) and re.search(pat, _read(p)) is not None
+            print(f"  [{'OK ' if present else 'MISSING'}] {desc}  ({rel})")
+            ok &= present
+        legacy = [rel for rel in ("agent/chat_completion_helpers.py", "agent/conversation_loop.py",
+                                  "gateway/run.py")
+                  if os.path.exists(os.path.join(root, rel)) and "HermesCloak:" in _read(os.path.join(root, rel))]
+        if legacy:
+            print(f"  [info] legacy source seams still present in {legacy} — harmless "
+                  "(restore is idempotent) and removed by the next hermes update")
+    elif root:
+        print(f"  [info] hermes root {root} not found — skipped the interception-point check")
+    print("--- vault ---")
+    for line in vault_status():
+        print(f"  {line}")
+    last, counts = audit_summary()
+    print("--- audit (last 24h) ---")
+    if last is None:
+        print("  [info] no plugin_active yet — restart the gateway after enabling, then run a turn")
+    else:
+        try:
+            patches = json.loads(last.get("detail") or "{}").get("patches", {})
+        except ValueError:
+            patches = {}
+        bad = {k: v for k, v in patches.items() if not str(v).startswith("ok")}
+        print(f"  [{'OK ' if not bad else 'MISSING'}] last plugin load {last.get('ts', '?')}: "
+              + ("all interception points + self-test ok" if not bad else json.dumps(bad)))
+        ok &= not bad
+    if counts:
+        print("  [info] events: " + ", ".join(f"{k}×{v}" for k, v in sorted(counts.items())))
+    last = last_masked_summary()
+
+    def _fmt(d):
+        return ", ".join(f"{k}: {v}" for k, v in sorted(d.items())) or "none"
+    if "in_request" in last:
+        print("  [info] last turn sent as tokens: " + _fmt(last["in_request"])
+              + "  (of which in the system prompt: " + _fmt(last.get("in_system_prompt") or {}) + ")")
+    if last.get("entities"):
+        print("  [info] vault total, all turns so far (distinct values): " + _fmt(last["entities"]))
+    try:
+        from hermescloak.adapter.hermes_live import _load_profile, _cloak_dir
+        from hermescloak.decide import shared as _decider
+        prof = _load_profile(hermes_home(), _cloak_dir())
+        if getattr(prof, "jev_check", False):
+            d = _decider()
+            b = getattr(prof, "decide_backend", "jev")
+            where = d.local_url() if b == "local" else "OpenRouter"
+            print(f"  [info] decision check: on — backend {b} ({where}) "
+                  + ("configured" if d.configured(b) else "NOT configured (no key / url); the check is skipped")
+                  + (" · shadow: " + ("local" if b == "jev" else "jev") if getattr(prof, "decide_shadow", False) else ""))
+    except Exception:
+        pass
+    inc = {k: counts[k] for k in INCIDENTS if counts.get(k)}
+    for k in INFO:
+        if counts.get(k):
+            print(f"  [info] {k}: {counts[k]}")
+    for k, n in inc.items():
+        print(f"  [WARN] {k}: {n}")
+    if strict and inc:
+        ok = False
+    print("--- " + ("protected ✓ (confirm on a live turn: plugin_active + enforce_send in "
+                    "$HERMES_HOME/cloak/audit.log)" if ok else "NOT PROTECTED — see MISSING above") + " ---")
     return ok
 
 
-def apply(root, dry):
-    changed = 0
-    for s in SEAMS:
-        p = os.path.join(root, s["file"])
-        if not os.path.exists(p):
-            print(f"  ! {s['file']} not found — skip {s['name']}")
-            continue
-        src = _read(p)
-        sym = s["block"].split("import ")[-1].split(" as")[0].split("\n")[0].strip() if "import " in s["block"] else ""
-        if any(t in src for t in ("cloak_sanitize_outbound", "cloak_restore_inbound", "cloak_filter_stream_delta")
-               if t in s["block"]):
-            print(f"  = already present: {s['name']}")
-            continue
-        if not s["auto"] or s["anchor"] is None or s["anchor"] not in src:
-            print(f"  ⚠ manual insert needed: {s['name']}  (anchor not found or wrap-style)")
-            print(f"     → paste this block into {s['file']}:\n")
-            print("\n".join("       " + ln for ln in s["block"].splitlines()) + "\n")
-            continue
-        if s.get("wrap"):
-            new = src.replace(s["anchor"], s["block"], 1)   # replace the assignment with the wrapped version
-        else:
-            idx = src.index(s["anchor"]) + len(s["anchor"])
-            new = src[:idx] + "\n" + s["block"] + src[idx:]
-        if dry:
-            print(f"  [dry-run] would insert seam {s['name']} after anchor in {s['file']}")
-        else:
-            with open(p, "w", encoding="utf-8") as f:
-                f.write(new)
-            print(f"  ✓ inserted: {s['name']}")
-            changed += 1
-    if not dry:
-        print(f"\n{changed} seam(s) inserted. Run --verify to confirm, then restart the gateway.")
-
-
 def main():
-    ap = argparse.ArgumentParser(description="Install/verify HermesCloak seams in hermes-agent")
+    ap = argparse.ArgumentParser(description="Enable/verify the HermesCloak hermes plugin")
     ap.add_argument("--hermes-root", default=None)
     ap.add_argument("--verify", action="store_true")
     ap.add_argument("--apply", action="store_true")
-    ap.add_argument("--print", dest="show", action="store_true", help="print all seam blocks")
+    ap.add_argument("--print", dest="show", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--strict", action="store_true", help="also fail on audit incidents in the last 24h")
     a = ap.parse_args()
-    root = hermes_root(a.hermes_root)
     if a.show:
-        for s in SEAMS:
-            print(f"\n=== {s['name']} — {s['file']} ===")
-            if s["anchor"]:
-                print(f"# insert AFTER the line:\n#   {s['anchor'].strip()}")
-            else:
-                print("# wrap-style — see the existing stream_delta_callback assignment")
-            print(s["block"])
+        print(__doc__)
         return 0
     if a.apply:
-        apply(root, a.dry_run)
-        return 0
-    # default = verify
-    return 0 if verify(root) else 1
+        return apply(a.dry_run)
+    return 0 if verify(hermes_root(a.hermes_root), a.strict) else 1
 
 
 if __name__ == "__main__":

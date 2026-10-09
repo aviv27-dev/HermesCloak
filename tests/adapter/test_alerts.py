@@ -14,6 +14,7 @@ def test_file_audit_alerter_writes_jsonl(tmp_path):
     lines = p.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 2
     rec = json.loads(lines[0])
+    assert rec.pop("ts")                                   # every event is timestamped
     assert rec == {"kind": "unfiltered_sent", "session_id": "s1", "detail": "boom"}
 
 def test_callback_alerter_formats_message():

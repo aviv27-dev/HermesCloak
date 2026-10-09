@@ -33,17 +33,47 @@ def _vault_dir(hermes_home: str | None) -> str:
     return os.path.join(_home(hermes_home), "cloak", "vaults")
 
 
+def _egress_key(hermes_home: str | None):
+    k = os.environ.get("HERMESCLOAK_VAULT_KEY", "").strip()
+    if k:
+        return k
+    ref = os.environ.get("HERMESCLOAK_VAULT_KEY_FILE", "").strip()
+    if not ref:
+        try:
+            with open(os.path.join(_home(hermes_home), "cloak", "vault_key_file"), encoding="utf-8") as f:
+                ref = f.read().strip()
+        except OSError:
+            ref = ""
+    if ref:
+        try:
+            with open(os.path.expanduser(ref), encoding="utf-8") as f:
+                return f.read().strip() or None
+        except OSError:
+            return None
+    return None
+
+
 def load_token_map(hermes_home: str | None = None) -> dict[str, str]:
-    """Merge token->real from ALL vault files for this agent (read-only)."""
+    """Merge token->real from ALL vault files for this agent (read-only). Reads encrypted
+    vaults when the key is available, and falls back to a vault's .bak if the main file is
+    unreadable (e.g. caught mid-crash)."""
+    from hermescloak.durable_vault import read_journal, read_payload
+    key = _egress_key(hermes_home)
     token_to_real: dict[str, str] = {}
     for path in sorted(glob(os.path.join(_vault_dir(hermes_home), "*.json"))):
-        try:
-            with open(path, encoding="utf-8") as f:
-                data = json.load(f)
+        for candidate in (path, path + ".bak"):
+            try:
+                data = read_payload(candidate, key)
+            except Exception:
+                continue
             for tok, real in (data.get("token_to_real") or {}).items():
                 token_to_real.setdefault(tok, real)   # first (oldest) wins; all should agree
+            break
+        try:                                          # mappings not yet compacted into the snapshot
+            for e in read_journal(path + ".journal", key)[0]:
+                token_to_real.setdefault(e["t"], e["r"])
         except Exception:
-            continue
+            pass
     return token_to_real
 
 
