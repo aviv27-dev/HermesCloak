@@ -68,6 +68,15 @@ if report.leftover:                               # fail-safe signal (see "Hones
 - **NER (optional `[ner]` extra):** Hebrew personal-name detection via DictaBERT-NER (lazy-loaded;
   runs as a separate shared service, not in-process). English NER is on the roadmap, not yet wired.
   Not required for the core.
+- **Israeli phones in any spelling:** `+972 (0)54-776-5611`, `972-54-7765611`, `054.776.5611`, `00972-3-…`
+  are normalized to one national number and validated (mobile/VoIP 9 digits, landline 8) before masking;
+  dates, amounts and case numbers never match. A labelled ת"ז written with its leading zeros dropped
+  (`ת.ז. 0000018`) is padded and check-digit-tested.
+- **Institutional mail stays readable:** addresses at `gov.il`, `muni.il`, `knesset.il`, `idf.il`
+  (configurable, suffix match) are not personal data — a court's automated sender keeps its name.
+- **Optional second opinion on the masked request** (`jev_check`): TypeSafe's Jev, a typed-decision
+  model, is asked whether a private person's name / contact / identifier is still in clear in the text
+  *as it leaves* (tokens, not values) — the gaps regexes and a client list cannot close. Off by default.
 - **Never-mask allowlist** (e.g. court/authority names) and an over-mask bias for *names* (a leaked
   identity is the catastrophic failure). Numeric detectors are precise to avoid shredding data dumps.
 - **Neutral typing for ambiguous IDs:** a bare 9-digit number (an Israeli national ID and a company

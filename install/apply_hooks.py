@@ -209,10 +209,19 @@ def vault_status():
 def verify(root, strict=False):
     ok = True
     print(f"HERMES_HOME: {hermes_home()}\n--- HermesCloak verification ---")
-    en, dis = _plugin_lists(_load_config())
+    cfg = _load_config()
+    en, dis = _plugin_lists(cfg)
     enabled = bool(en) and PLUGIN in en and PLUGIN not in dis
     print(f"  [{'OK ' if enabled else 'MISSING'}] plugin enabled in config.yaml (plugins.enabled)")
     ok &= enabled
+    runtime = str(((cfg.get("model") or {}) if isinstance(cfg.get("model"), dict) else {})
+                  .get("openai_runtime") or "auto").strip().lower()
+    if runtime == "codex_app_server":
+        print("  [WARN] model.openai_runtime: codex_app_server — turns are handed to the codex subprocess, "
+              "which talks to OpenAI directly: HermesCloak does NOT cover that path. "
+              "Switch it off (`/codex-runtime auto`) for a protected agent.")
+        if strict:
+            ok = False
     try:
         import hermescloak.hermes_plugin  # noqa: F401
         print("  [OK ] hermescloak importable by this python")
@@ -267,6 +276,14 @@ def verify(root, strict=False):
               + "  (of which in the system prompt: " + _fmt(last.get("in_system_prompt") or {}) + ")")
     if last.get("entities"):
         print("  [info] vault total, all turns so far (distinct values): " + _fmt(last["entities"]))
+    try:
+        from hermescloak.adapter.hermes_live import _load_profile, _cloak_dir
+        from hermescloak.decide import shared as _decider
+        if getattr(_load_profile(hermes_home(), _cloak_dir()), "jev_check", False):
+            print("  [info] jev_check: on — key " + ("set" if _decider().configured()
+                                                     else "MISSING (OPENROUTER_API_KEY); the check is skipped"))
+    except Exception:
+        pass
     inc = {k: counts[k] for k in INCIDENTS if counts.get(k)}
     for k in INFO:
         if counts.get(k):

@@ -93,6 +93,21 @@ python install/apply_hooks.py --verify --strict --hermes-root /path/to/hermes-ag
 Expect exit 0; `new_pii` lines are informational. Any `[WARN]` (unfiltered_sent, leftover_token,
 leaked_original, seam_missing, vault_*, config_error, ner_down) is a finding to investigate.
 
+## 8. Optional: the Jev second opinion (`jev_check`)
+
+Measure before trusting. With `OPENROUTER_API_KEY` in the shell (never in a chat):
+
+```bash
+OPENROUTER_API_KEY=... python install/jev_corpus_check.py
+```
+
+Every fictional case is tokenized and the MASKED text is shown to Jev twice: with the shipped client
+list (two parties and all first names left in clear → "person: yes" is the right answer) and with a
+complete list (nothing left → every answer should be "no"). The second run is the false-positive
+measurement. Then, on the agent: `jev_check: true` in `profile.yaml` (live, no restart), run a turn,
+and expect `jev_residual` in the audit log with `probs` and `ms`; a dead key or service shows as
+`jev_unavailable` and the turn goes on unchecked. `jev_action: block` only after the measurement.
+
 ## Cleanup
 
 Remove the synthetic names from `gazetteer.txt`. Test tokens stay in the vault until its TTL

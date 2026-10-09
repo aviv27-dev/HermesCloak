@@ -88,3 +88,37 @@ def test_gush_helka_type_has_no_underscore():
     # regression: a type with '_' breaks the ⟦type_n⟧ grammar -> unrestorable token
     sp = [s for s in R.recognize("הנכס בגוש 6941 חלקה 21") if "גוש" in s.entity_type]
     assert sp and "_" not in sp[0].entity_type
+
+
+# ---- spellings and exemptions learned from the office's own PII module (pii.js / phone-identify.js)
+
+def _types(text, **kw):
+    from hermescloak.recognizers.deterministic import DeterministicRecognizer
+    return [(s.entity_type, s.text) for s in DeterministicRecognizer(**kw).recognize(text)]
+
+
+def test_phone_in_every_common_spelling():
+    text = "+972 (0)54-776-5611 / 972-54-7765611 / 0547765611 / 054.776.5611 / 00972-3-1234567 / 08 123 4567"
+    assert [t for t, _ in _types(text)] == ["טלפון"] * 6
+
+
+def test_labelled_id_with_dropped_leading_zeros_is_padded_and_validated():
+    # 000000018 is valid; written after a person label with its zeros dropped it must still be caught
+    assert ("תז", "0000018") in _types('ת.ז. 0000018')
+    assert ("תז", "00000018") in _types('תעודת זהות: 00000018')
+    assert ("תז", "000000018") in _types('ID 000000018')
+    assert _types('ת"ז 1234567') == []                      # 001234567: bad check digit → not an ID
+    cn = str(514543628); sep = f"{cn[:2]}-{cn[2:8]}-{cn[8]}"
+    assert ("חפ", sep) in _types(f"ח.פ {sep}")               # a company number keeps its own type
+    assert _types("ח.פ 1454362") == []                          # …and is never padded
+
+
+def test_institutional_mail_domains_pass_through_by_default_personal_ones_are_masked():
+    text = "court@court.gov.il, moked@tel-aviv.muni.il, yossi@gmail.com, dana@aviv-law.co.il, a@gov.il.evil.com"
+    assert [v for t, v in _types(text) if t == "מייל"] == ["yossi@gmail.com", "dana@aviv-law.co.il", "a@gov.il.evil.com"]
+
+
+def test_skip_domains_is_configurable_and_can_be_emptied():
+    text = "court@court.gov.il, x@aviv-law.co.il"
+    assert [v for t, v in _types(text, skip_email_domains=["aviv-law.co.il"]) if t == "מייל"] == ["court@court.gov.il"]
+    assert len([1 for t, _ in _types(text, skip_email_domains=[]) if t == "מייל"]) == 2

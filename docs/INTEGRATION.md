@@ -32,7 +32,7 @@ Everything that identifies a deployment lives under `$HERMES_HOME/cloak/` — ne
 ```
 $HERMES_HOME/cloak/
   MODE            # one of: off | shadow | enforce   (read live, per turn — no restart to change)
-  profile.yaml    # copy of profiles/example.yaml, adapted   (never_mask, fail_mode, token_instruction)
+  profile.yaml    # copy of profiles/example.yaml, adapted   (never_mask, never_mask_domains, fail_mode, jev_check…)
   gazetteer.txt   # optional: known names, one "surface<TAB>type" per line (e.g. client list)
   ner_url         # optional: URL of the Hebrew NER microservice (see hermescloak/service/ner_service.py)
   vault_key_file  # optional: PATH of a Fernet key file → vault encrypted at rest (see below)
@@ -89,7 +89,7 @@ silently reducing coverage.
 | vault idle / swept / deleted while in use | the TTL counts from last **use** (restores and reuse refresh it); sweeps re-check under the vault lock; a live process that finds its file gone rewrites it (`vault_resurrected`) |
 | broken `profile.yaml` / unreadable `gazetteer.txt` | last good version kept (`config_error`) |
 | NER service hung or down | circuit breaker: one timeout, then NER is skipped for 30 s (`ner_down` / `ner_up`) instead of a timeout per message |
-| internal filter error | `fail_mode: open` → original sent + `unfiltered_sent`; `fail_mode: closed` → text withheld + `blocked_send` |
+| internal filter error | `fail_mode: open` → original sent + `unfiltered_sent`; `fail_mode: closed` → text withheld + `blocked_send` (also with `jev_action: block` on a Jev hit) |
 | hermes update moves an interception point | `seam_missing` at load + warning; two official-API backstops still restore tool arguments (`tool_request` middleware) and the final reply (`transform_llm_output`) |
 | concurrent sessions in one process | the vault is thread-safe (one token per value, ever) |
 | long-running gateway | engines, content caches and the replay cache are bounded LRUs; audit log rotates |
@@ -125,6 +125,8 @@ fail-safe alarm — investigate).
 |-------|---------|
 | `plugin_active` | plugin loaded: per-interception-point status + `self_test` |
 | `enforce_send` | a request was tokenized: `in_request` (distinct tokens per type in THIS request), `in_system_prompt` (the part of those inside the system prompt, e.g. names in SOUL.md), `entities` (cumulative distinct values in the vault, all turns so far — not this turn), `real_values_in_outbound` (must be 0), `replayed` |
+| `jev_residual` | (`jev_check: true`) the typed-decision second opinion on the masked request: `probs` per question (person / contact / identifier still in clear), `hits` ≥ `jev_min_confidence`, `ms`, `model` |
+| `jev_unavailable` | the second opinion did not run: `no-key`, `timeout`, `breaker`, `busy`, `error` — the turn went on unchecked (rate-limited) |
 | `enforce_restore` | a reply was restored; `leftover` > 0 = alarm |
 | `leftover_token` | which token(s) could not be restored |
 | `leaked_original` | the model wrote a value we had masked — it saw it via some unmasked path: **investigate** |
@@ -145,8 +147,11 @@ For an end-to-end proof on your hermes version (a real agent turn against a loca
 
 ## Not covered (know these)
 
-- **Codex app-server runtime** (`codex_app_server`): the Codex subprocess talks to OpenAI itself;
-  hermes never sees the request, so it cannot be tokenized. Don't use that runtime for sensitive matters.
+- **Codex app-server runtime** (`model.openai_runtime: codex_app_server`, `/codex-runtime on`): the
+  Codex subprocess talks to OpenAI itself; hermes never sees the request, so it cannot be tokenized.
+  `apply_hooks.py --verify` prints a WARN for such a profile (`--strict` fails). The default Codex
+  OAuth route (`codex_responses`, runtime `auto`) IS covered. Don't use the app-server runtime for
+  sensitive matters.
 - **Mixture-of-Agents prepared requests** and **streaming auxiliary calls** bypass the funnels above.
 - Codex `provider_data` replay items (e.g. `codex_message_items`) keep the model's tokenized text;
   they are replayed to the model as-is (consistent, since the vault is durable) but are stored with tokens.
@@ -165,3 +170,21 @@ It is **not airtight**: names not known to the gazetteer/NER, transliterated/for
 forms, and free-text quasi-identifiers can pass through. Treat HermesCloak as strong risk
 **reduction**, not a guarantee — and see [AGENT-PROMPT.md](AGENT-PROMPT.md) for keeping the agent
 from defeating it.
+
+### Optional second opinion: a typed-decision model on the masked request (`jev_check`)
+
+The two gaps the deterministic layer cannot close — a first name on its own, and a party whose name
+is not on the client list (NER off) — are exactly what a reader of the *tokenized* text can still
+notice. With `jev_check: true` and `OPENROUTER_API_KEY` in the agent's environment, every request is
+also shown, **as it leaves (tokens, not values)**, to TypeSafe's Jev (a System One model: typed,
+calibrated yes/no answers, ~0.3–0.6 s, via OpenRouter `POST /api/alpha/decisions`), asked three
+questions: is a private person's name / a personal contact detail / a personal identifier still in
+clear. Answers ≥ `jev_min_confidence` are hits; `jev_action: audit` logs them (`jev_residual`),
+`jev_action: block` withholds the request like `fail_mode: closed`. Guards (`hermescloak/decide.py`):
+`jev_timeout_s` (default 3 s) then the turn goes on unchecked, a circuit breaker (3 failures → 10 min
+off), at most 2 calls in flight, no key → nothing sent, never raises. Off by default: a second vendor
+sees the masked text. Measure it on your own data before trusting it (`install/jev_corpus_check.py`).
+
+Institutional mail domains (`never_mask_domains`, default `gov.il`, `muni.il`, `knesset.il`, `idf.il`,
+suffix match) are left in clear: a court's automated sender or a ministry is not personal data, and
+masking it costs a mail summary its sender. Set `never_mask_domains: []` to mask every address.

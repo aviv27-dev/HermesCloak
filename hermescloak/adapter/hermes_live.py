@@ -284,6 +284,30 @@ def _fail_closed() -> bool:
 
 
 _REDACTED = "[HermesCloak: content withheld — PII filter failed (fail_mode: closed)]"
+_REDACTED_JEV = "[HermesCloak: content withheld — an identifier may still be in clear (jev_action: block)]"
+
+
+def _jev_residual(eng, masked_text: str):
+    """Optional typed-decision second opinion on the masked request (profile ``jev_check``). Audits
+    ``jev_residual`` (probabilities + hits, counts only) or ``jev_unavailable``; never raises."""
+    try:
+        if not getattr(eng.profile, "jev_check", False):
+            return None
+        from hermescloak import residual as _res
+        r = _res.check(masked_text, eng.profile)
+        if r is None:
+            _audit("jev_unavailable", json.dumps({"reason": "no-key"}), every=600)
+            return None
+        if "error" in r:
+            _audit("jev_unavailable", json.dumps({"reason": r["error"], "detail": r.get("detail"),
+                                                  "ms": r.get("ms")}), every=60)
+            return None
+        _audit("jev_residual", json.dumps({"hits": r["hits"], "probs": r["probs"], "ms": r["ms"],
+                                           "model": r.get("model")}, ensure_ascii=False))
+        return r
+    except Exception as exc:  # noqa: BLE001
+        _audit("jev_unavailable", json.dumps({"reason": "error", "detail": repr(exc)[:120]}), every=60)
+        return None
 
 
 # ---------------------------------------------------------------- outbound
@@ -343,6 +367,11 @@ def cloak_sanitize_request(request: dict, session_id=None, api_mode: str = ""):
         # measured BEFORE the instruction is added, so its example tokens never count
         in_request = _tokens_by_type(_p.request_text_blob(sanitized), eng.vault)
         in_system = _tokens_by_type(_p.system_text_blob(sanitized), eng.vault)
+        residual = _jev_residual(eng, _p.request_text_blob(sanitized))
+        if residual and residual.get("hits") and getattr(eng.profile, "jev_action", "audit") == "block":
+            _audit("blocked_send", json.dumps({"reason": "jev_residual", "hits": residual["hits"]},
+                                              ensure_ascii=False))
+            return _p.transform_request(request, lambda _s: _REDACTED_JEV)
         if eng.profile.token_instruction and not eng.vault.is_empty():
             from hermescloak.instruction import TOKEN_INSTRUCTION
             sanitized = _p.inject_instruction(sanitized, TOKEN_INSTRUCTION, api_mode)

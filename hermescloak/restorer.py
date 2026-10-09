@@ -17,8 +17,14 @@ _LOOSE_RE = re.compile(
 )
 
 
+# A token with its brackets STRIPPED ("לקוח_1", "מייל_2"): some models (GLM, gpt-5.x) answer that way
+# and the placeholder then reaches the user. Restored only as a whole word (not inside a longer word,
+# not "מייל_1" inside "מייל_12") and only when that exact token was issued by this vault.
+_BARE_RE = re.compile(r"(?<![\w⟦⟨【\[])([^\W\d_]{1,24})_(\d{1,6})(?![\d⟧⟩】\]])")
+
+
 def restore_text(text: str, vault: Vault, tolerant=False) -> str:
-    """``tolerant``: False | True (all bracket styles) | "strict" (⟦⟧/⟨⟩ only — tool args)."""
+    """``tolerant``: False | True (all bracket styles + bare labels) | "strict" (⟦⟧/⟨⟩ only — tool args)."""
     def _sub(m):
         real = vault.restore_token(m.group(0))
         return real if real is not None else m.group(0)
@@ -28,6 +34,11 @@ def restore_text(text: str, vault: Vault, tolerant=False) -> str:
             real = vault.restore_token(make_token(m.group(1).strip(), int(m.group(2))))
             return real if real is not None else m.group(0)
         out = (_LOOSE_STRICT_RE if tolerant == "strict" else _LOOSE_RE).sub(_loose, out)
+    if tolerant is True and "_" in out and not vault.is_empty():
+        def _bare(m):
+            real = vault.restore_token(make_token(m.group(1), int(m.group(2))))
+            return real if real is not None else m.group(0)
+        out = _BARE_RE.sub(_bare, out)
     return out
 
 

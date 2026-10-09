@@ -234,11 +234,11 @@ def main():
     _register_probe()
 
     providers = ["openai", "anthropic"] if a.provider == "both" else [a.provider]
-    ok = True
+    ok, ran = True, False
     for p in providers:
         if p == "anthropic":
             try:
-                import anthropic  # noqa: F401
+                import anthropic  # noqa: F401  # hermes pins anthropic==0.87.0; a newer SDK (httpx2) breaks its adapter
             except ImportError:
                 print("  [SKIP] anthropic: `anthropic` package not installed in this python")
                 continue
@@ -250,6 +250,10 @@ def main():
         for k, v in checks.items():
             print(f"  [{'OK ' if v else 'FAIL'}] {k}")
         ok &= all(checks.values())
+        ran = True
+    if not ran:
+        print("--- nothing ran (every provider skipped) ---")
+        return 2
     audit = open(os.path.join(home, "cloak", "audit.log"), encoding="utf-8").read()
     tail = {
         "plugin_active, no seam_missing": "plugin_active" in audit and "seam_missing" not in audit,

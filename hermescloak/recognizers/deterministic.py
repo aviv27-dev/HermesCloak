@@ -1,18 +1,26 @@
 import re
+from hermescloak import phone as _phone
 from hermescloak.span import Span
 
-_EMAIL = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
-_PHONE = re.compile(r"(?<!\d)(?:\+972[\-\s]?|0)(?:[2-9]\d?)[\-\s]?\d{3}[\-\s]?\d{4}(?!\d)")
+_EMAIL = re.compile(r"[A-Za-z0-9._%+\-]+@([A-Za-z0-9.\-]+\.[A-Za-z]{2,})")
+# Institutional mailboxes (a court's automated sender, a ministry, a municipality) are not personal
+# data, and masking them costs a mail summary its sender. Suffix match on the domain; a person's
+# address at such a domain is still a name, and names are handled by the gazetteer / NER.
+DEFAULT_SKIP_EMAIL_DOMAINS = ("gov.il", "muni.il", "knesset.il", "idf.il")
 _DIGITS9 = re.compile(r"(?<!\d)\d{9}(?!\d)")
 # label-anchored ID / company number that MAY carry separators (hyphens/dots/spaces):
 # e.g. "ח.פ 51-454362-3", "ת.ז 12345678-9", "ע.מ: 514543623". Capture the digit group,
 # strip separators, validate the 9-digit Israeli check-digit.
 # Q: a label's quote/geresh — also in its JSON-escaped form (ת\"ז inside a tool result).
 _Q = r"(?:\\?[.\"״'׳])"
+# A labelled ת"ז may be written with its leading zero(s) dropped ("ת"ז 1234567" for 001234567):
+# 7–9 digits are accepted after a PERSON label and padded to 9 before the check digit is tested.
 _ID_LABELED = re.compile(
-    r'(?P<label>ח' + _Q + r'?\s*פ|ת' + _Q + r'?\s*ז|ע' + _Q + r'?\s*מ|עוסק\s+מורשה|מספר\s+חברה|ח\.?\s*ל\.?\s*צ)'
-    r'\s*[:#.\-]?\s*(?P<num>\d[\d.\-/ ]{7,13}\d)'
+    r'(?P<label>ח' + _Q + r'?\s*פ|ת' + _Q + r'?\s*ז|תעודת\s+זהות|(?<![A-Za-z])ID(?![A-Za-z])'
+    r'|ע' + _Q + r'?\s*מ|עוסק\s+מורשה|מספר\s+חברה|ח\.?\s*ל\.?\s*צ)'
+    r'\s*[:#.\-]?\s*(?P<num>\d[\d.\-/ ]{5,13}\d)'
 )
+_PERSON_LABEL = re.compile(r'^(?:ת|תעודת|ID)')
 # real credit cards = 13-19 CONTIGUOUS digits, or uniform 4-digit groups ("4111 1111 1111 1111").
 # NOT a separator after every digit (that spanned unrelated numbers in CRM dumps → 52 false matches).
 _CARD = re.compile(r"(?<!\d)(?:\d{13,19}|\d{4}(?:[ -]\d{4}){2,4})(?!\d)")
@@ -96,8 +104,13 @@ class DeterministicRecognizer:
     """Universal/structured PII: IL id (check-digit), phone, email, credit (Luhn),
     case numbers, gush/helka, credentials. Language-independent."""
 
-    def __init__(self, secrets: bool = True) -> None:
+    def __init__(self, secrets: bool = True, skip_email_domains=DEFAULT_SKIP_EMAIL_DOMAINS) -> None:
         self._secrets = secrets
+        self._skip_domains = tuple(d.lower().lstrip(".") for d in (skip_email_domains or ()))
+
+    def _institutional(self, domain: str) -> bool:
+        d = domain.lower()
+        return any(d == sd or d.endswith("." + sd) for sd in self._skip_domains)
 
     def recognize(self, text: str) -> list[Span]:
         spans: list[Span] = []
@@ -107,8 +120,11 @@ class DeterministicRecognizer:
             for m in _SECRET_ASSIGN.finditer(text):
                 spans.append(Span(m.start("val"), m.end("val"), "סוד", m.group("val")))
         for m in _EMAIL.finditer(text):
-            spans.append(Span(m.start(), m.end(), "מייל", m.group(0)))
-        for m in _PHONE.finditer(text):
+            if not self._institutional(m.group(1)):
+                spans.append(Span(m.start(), m.end(), "מייל", m.group(0)))
+        for m in _phone.CANDIDATE.finditer(text):
+            if _phone.normalize(m.group(0)) is None:
+                continue
             digits = re.sub(r"\D", "", m.group(0))
             if len(digits) == 9 and _valid_israeli_id(digits):
                 continue  # a valid 9-digit Israeli ID, not a phone — let the ID detectors label it
@@ -133,9 +149,11 @@ class DeterministicRecognizer:
         for m in _ID_LABELED.finditer(text):
             num = m.group("num")
             digits = re.sub(r"\D", "", num)
+            person = bool(_PERSON_LABEL.match(m.group("label")))
+            if person and 7 <= len(digits) < 9:
+                digits = digits.zfill(9)          # leading zeros dropped after a ת"ז label
             if len(digits) == 9 and _valid_israeli_id(digits):
-                etype = "תז" if m.group("label").startswith("ת") else "חפ"
-                spans.append(Span(m.start("num"), m.end("num"), etype, num))
+                spans.append(Span(m.start("num"), m.end("num"), "תז" if person else "חפ", num))
         for m in _SEP_ID.finditer(text):
             digits = re.sub(r"\D", "", m.group(0))
             if len(digits) == 9 and _valid_israeli_id(digits):
