@@ -24,6 +24,9 @@ class Profile:
     jev_min_confidence: float = 0.7
     jev_action: str = "audit"          # "audit" (log only) | "block" (withhold the request, like fail_mode closed)
     jev_timeout_s: float = 3.0
+    jev_max_chars: int = 600           # level B: at most this much (masked) text per call
+    decide_backend: str = "jev"        # "jev" (OpenRouter) | "local" (the office model, /v1/systemone)
+    decide_shadow: bool = False        # also ask the other backend in the background and audit both
 
     @classmethod
     def from_yaml(cls, path: str) -> "Profile":
@@ -47,4 +50,7 @@ class Profile:
             jev_min_confidence=float(data.get("jev_min_confidence", 0.7)),
             jev_action=str(data.get("jev_action", "audit")),
             jev_timeout_s=float(data.get("jev_timeout_s", 3.0)),
+            jev_max_chars=int(data.get("jev_max_chars", 600)),
+            decide_backend=str(data.get("decide_backend", "jev")),
+            decide_shadow=bool(data.get("decide_shadow", False)),
         )

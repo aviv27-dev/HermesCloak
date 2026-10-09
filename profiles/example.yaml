@@ -36,3 +36,9 @@ jev_check: false
 jev_min_confidence: 0.7    # a question answered with at least this probability is a hit
 jev_action: audit          # audit: log `jev_residual` only | block: withhold the request on a hit
 jev_timeout_s: 3           # Jev answers in ~0.3–0.6 s; past this the turn goes on unchecked
+jev_max_chars: 600         # level B: at most this much masked text per call (the office's approved cap)
+decide_backend: jev        # jev (OpenRouter) | local — the office's own Hebrew decision model behind
+                           # HERMESCLOAK_LOCAL_DECIDE_URL (default http://127.0.0.1:11600, /v1/systemone):
+                           # nothing leaves the office network. The primary falls back to the other.
+decide_shadow: false       # also ask the OTHER backend in the background; both answers go to the audit
+                           # log (decide_shadow) — how a new model earns its place before it is switched on

@@ -6,15 +6,19 @@ a private person's name, a contact detail or an identifier is still there in cle
 exactly what the cloud model is about to receive anyway (tokens, not values), so the check adds no
 new kind of exposure — but it IS a second vendor; it is off unless ``jev_check: true`` and a key.
 
-``check(text, profile)`` → ``{"hits": {q: p}, "probs": {q: p}, "ms": int, "model": str}`` or None when
-the check did not run (off, no key, breaker, timeout…) — the caller then behaves as before.
+``check(text, profile)`` → ``{"hits": {q: p}, "probs": {q: p}, "ms", "model", "backend"}`` or None when
+the check is off / unconfigured; ``{"error": reason}`` when it did not run (breaker, timeout, cap…) —
+the caller then behaves as before. Backend: Jev, or the office's own local decision model
+(profile ``decide_backend: local``), optionally with the other one in shadow (``decide_shadow``).
 """
 from __future__ import annotations
 
 from hermescloak import decide as _decide
 
-USE_CASE = "hermescloak:residual"
-MAX_CHARS = 6000          # the most recent part of the request is what a new leak would be in
+USE_CASE = "residual:request"
+# Level B as the office approved it for Jev: at most 600 characters of (masked) text per call. The
+# most recent part of the request is where a new leak would be. Raise it only for the local backend.
+MAX_CHARS = 600
 
 QUESTIONS = {
     "person": {"type": "noul",
@@ -35,18 +39,22 @@ QUESTIONS = {
 }
 
 
-def check(text: str, profile, decider: _decide.Decider | None = None) -> dict | None:
+def check(text: str, profile, decider: _decide.Decider | None = None, on_shadow=None) -> dict | None:
     if not getattr(profile, "jev_check", False):
         return None
     d = decider or _decide.shared()
-    if not d.configured():
+    backend = getattr(profile, "decide_backend", None) or None
+    if not d.configured(backend):
         return None
     text = text or ""
-    if len(text) > MAX_CHARS:
-        text = text[-MAX_CHARS:]
-    r = d.decide(USE_CASE, {"text": text}, QUESTIONS, timeout_s=getattr(profile, "jev_timeout_s", None))
+    cap = int(getattr(profile, "jev_max_chars", MAX_CHARS) or MAX_CHARS)
+    if len(text) > cap:
+        text = text[-cap:]
+    r = d.decide(USE_CASE, {"text": text}, QUESTIONS, timeout_s=getattr(profile, "jev_timeout_s", None),
+                 backend=backend, shadow=bool(getattr(profile, "decide_shadow", False)), on_shadow=on_shadow)
     if not r.get("ok"):
-        return {"error": r.get("reason"), "detail": r.get("error"), "ms": r.get("ms")}
+        return {"error": r.get("reason"), "detail": r.get("error"), "ms": r.get("ms"),
+                "announce": r.get("announce", False), "backend": r.get("backend")}
     probs = {}
     for name, a in (r.get("answers") or {}).items():
         try:
@@ -55,4 +63,5 @@ def check(text: str, profile, decider: _decide.Decider | None = None) -> dict | 
             continue
     thr = float(getattr(profile, "jev_min_confidence", 0.7))
     hits = {k: v for k, v in probs.items() if v >= thr}
-    return {"hits": hits, "probs": probs, "ms": r.get("ms"), "model": r.get("model")}
+    return {"hits": hits, "probs": probs, "ms": r.get("ms"), "model": r.get("model"),
+            "backend": r.get("backend"), "fell_back_from": r.get("fell_back_from")}

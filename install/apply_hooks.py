@@ -279,9 +279,14 @@ def verify(root, strict=False):
     try:
         from hermescloak.adapter.hermes_live import _load_profile, _cloak_dir
         from hermescloak.decide import shared as _decider
-        if getattr(_load_profile(hermes_home(), _cloak_dir()), "jev_check", False):
-            print("  [info] jev_check: on — key " + ("set" if _decider().configured()
-                                                     else "MISSING (OPENROUTER_API_KEY); the check is skipped"))
+        prof = _load_profile(hermes_home(), _cloak_dir())
+        if getattr(prof, "jev_check", False):
+            d = _decider()
+            b = getattr(prof, "decide_backend", "jev")
+            where = d.local_url() if b == "local" else "OpenRouter"
+            print(f"  [info] decision check: on — backend {b} ({where}) "
+                  + ("configured" if d.configured(b) else "NOT configured (no key / url); the check is skipped")
+                  + (" · shadow: " + ("local" if b == "jev" else "jev") if getattr(prof, "decide_shadow", False) else ""))
     except Exception:
         pass
     inc = {k: counts[k] for k in INCIDENTS if counts.get(k)}

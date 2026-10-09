@@ -76,7 +76,9 @@ if report.leftover:                               # fail-safe signal (see "Hones
   (configurable, suffix match) are not personal data — a court's automated sender keeps its name.
 - **Optional second opinion on the masked request** (`jev_check`): TypeSafe's Jev, a typed-decision
   model, is asked whether a private person's name / contact / identifier is still in clear in the text
-  *as it leaves* (tokens, not values) — the gaps regexes and a client list cannot close. Off by default.
+  *as it leaves* (tokens, not values) — the gaps regexes and a client list cannot close. Off by default;
+  the same door serves the office's own locally hosted decision model (`decide_backend: local`), with
+  shadow mode and per-use calibration to earn the switch.
 - **Never-mask allowlist** (e.g. court/authority names) and an over-mask bias for *names* (a leaked
   identity is the catastrophic failure). Numeric detectors are precise to avoid shredding data dumps.
 - **Neutral typing for ambiguous IDs:** a bare 9-digit number (an Israeli national ID and a company

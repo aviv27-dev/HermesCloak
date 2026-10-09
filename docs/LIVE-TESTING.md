@@ -108,6 +108,17 @@ measurement. Then, on the agent: `jev_check: true` in `profile.yaml` (live, no r
 and expect `jev_residual` in the audit log with `probs` and `ms`; a dead key or service shows as
 `jev_unavailable` and the turn goes on unchecked. `jev_action: block` only after the measurement.
 
+**Switching to the office's own decision model.** Point `HERMESCLOAK_LOCAL_DECIDE_URL` at the tunnel
+(`/v1/systemone`), keep `decide_backend: jev` and set `decide_shadow: true` for a week; then
+
+```bash
+python install/decide_shadow_report.py            # agreement per question at the threshold, latency
+```
+
+Switch `decide_backend: local` only when the shadow agrees on the questions that matter and its
+"only shadow" column (hits Jev did not raise) has been read, not just counted. Calibrate first if
+its probabilities are over-confident (`HERMESCLOAK_DECIDE_CALIBRATION`). Jev stays as the fallback.
+
 ## Cleanup
 
 Remove the synthetic names from `gazetteer.txt`. Test tokens stay in the vault until its TTL

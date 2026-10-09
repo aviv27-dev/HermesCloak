@@ -126,7 +126,8 @@ fail-safe alarm — investigate).
 | `plugin_active` | plugin loaded: per-interception-point status + `self_test` |
 | `enforce_send` | a request was tokenized: `in_request` (distinct tokens per type in THIS request), `in_system_prompt` (the part of those inside the system prompt, e.g. names in SOUL.md), `entities` (cumulative distinct values in the vault, all turns so far — not this turn), `real_values_in_outbound` (must be 0), `replayed` |
 | `jev_residual` | (`jev_check: true`) the typed-decision second opinion on the masked request: `probs` per question (person / contact / identifier still in clear), `hits` ≥ `jev_min_confidence`, `ms`, `model` |
-| `jev_unavailable` | the second opinion did not run: `no-key`, `timeout`, `breaker`, `busy`, `error` — the turn went on unchecked (rate-limited) |
+| `jev_unavailable` | the second opinion did not run: `no-key`, `timeout`, `breaker`, `busy`, `daily-cap`, `error` (+ `backend`) — the turn went on unchecked (rate-limited; the daily cap is announced once a day) |
+| `decide_shadow` | (`decide_shadow: true`) one decision as both backends saw it: `primary`, `shadow`, their answers as probabilities only, `shadow_ms` |
 | `enforce_restore` | a reply was restored; `leftover` > 0 = alarm |
 | `leftover_token` | which token(s) could not be restored |
 | `leaked_original` | the model wrote a value we had masked — it saw it via some unmasked path: **investigate** |
@@ -180,10 +181,25 @@ also shown, **as it leaves (tokens, not values)**, to TypeSafe's Jev (a System O
 calibrated yes/no answers, ~0.3–0.6 s, via OpenRouter `POST /api/alpha/decisions`), asked three
 questions: is a private person's name / a personal contact detail / a personal identifier still in
 clear. Answers ≥ `jev_min_confidence` are hits; `jev_action: audit` logs them (`jev_residual`),
-`jev_action: block` withholds the request like `fail_mode: closed`. Guards (`hermescloak/decide.py`):
-`jev_timeout_s` (default 3 s) then the turn goes on unchecked, a circuit breaker (3 failures → 10 min
-off), at most 2 calls in flight, no key → nothing sent, never raises. Off by default: a second vendor
-sees the masked text. Measure it on your own data before trusting it (`install/jev_corpus_check.py`).
+`jev_action: block` withholds the request like `fail_mode: closed`. At most `jev_max_chars` (default
+600 — the "level B" cap the office approved for Jev) of the most recent masked text go per call.
+Guards (`hermescloak/decide.py`): `jev_timeout_s` (default 3 s) then the turn goes on unchecked, a
+circuit breaker per backend (3 failures → 10 min off), at most 2 calls in flight, a daily cap that
+announces itself once (`jev_unavailable` with `daily-cap`), no key → nothing sent, never raises. Off by
+default: a second vendor sees the masked text. Measure it on your own data before trusting it
+(`install/jev_corpus_check.py`).
+
+**Two backends, one door.** `decide_backend: jev` (default) or `local`: a server speaking the same
+wire (`POST <HERMESCLOAK_LOCAL_DECIDE_URL>/v1/systemone`, default `http://127.0.0.1:11600`) — the
+office's own Hebrew decision model (a LoRA on DictaLM-3.0-1.7B that scores option keys, served on the
+office GPU behind an SSH tunnel), so nothing leaves the office network. A primary that gives no answer
+falls back to the other backend when it is configured. `decide_shadow: true` also asks the other
+backend in the background and writes both answers (probabilities only) as `decide_shadow` events;
+`install/decide_shadow_report.py` turns those into per-question agreement and latency — a new model
+earns its place in shadow before `decide_backend` is switched. Per-use calibration
+(`HERMESCLOAK_DECIDE_CALIBRATION`, a JSON `{use: {question: T}}`, `p ∝ p^(1/T)`) makes a local
+model's probabilities mean what the threshold assumes. Thresholds always compare the probability of
+the chosen option, never Jev's `confidence` (a margin measure that reads lower).
 
 Institutional mail domains (`never_mask_domains`, default `gov.il`, `muni.il`, `knesset.il`, `idf.il`,
 suffix match) are left in clear: a court's automated sender or a ministry is not personal data, and

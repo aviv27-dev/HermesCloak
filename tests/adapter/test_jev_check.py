@@ -111,3 +111,41 @@ def test_profile_keys_load_from_yaml(tmp_path):
     assert prof.jev_check and prof.jev_action == "block" and prof.jev_min_confidence == 0.6
     assert prof.never_mask_domains == ["aviv-law.co.il"]
     assert Profile(name="d").never_mask_domains == ["gov.il", "muni.il", "knesset.il", "idf.il"]
+
+
+def test_local_backend_from_profile_and_600_char_cap(tmp_path, monkeypatch):
+    from tests.test_decide import _FakeLocal
+    f = _FakeLocal()
+    try:
+        cloak = _setup(tmp_path, monkeypatch, "jev_check: true\ndecide_backend: local\n", key="")
+        monkeypatch.setenv("HERMESCLOAK_LOCAL_DECIDE_URL", f.url)
+        monkeypatch.setattr(D, "_shared", None)
+        req = {"model": "m", "messages": [{"role": "user", "content": "א" * 2000 + " דנה לוי סוף"}]}
+        live.cloak_sanitize_request(req, "s1", "chat_completions")
+        assert len(f.calls) == 1 and f.calls[0]["path"] == "/v1/systemone"
+        sent = f.calls[0]["body"]["state"]["text"]
+        assert len(sent) <= 600 and sent.endswith("⟦לקוח_1⟧ סוף")             # the most recent 600 chars
+        ev = [json.loads(e["detail"]) for e in _audit(cloak) if e["kind"] == "jev_residual"]
+        assert ev and ev[0]["backend"] == "local"
+    finally:
+        f.close()
+
+
+def test_shadow_audits_both_backends(tmp_path, monkeypatch):
+    from tests.test_decide import _FakeLocal
+    import time as _t
+    jev, loc = _Fake(), _FakeLocal()
+    try:
+        cloak = _setup(tmp_path, monkeypatch, "jev_check: true\ndecide_shadow: true\n", fake=jev)
+        monkeypatch.setenv("HERMESCLOAK_LOCAL_DECIDE_URL", loc.url)
+        monkeypatch.setattr(D, "_shared", None)
+        live.cloak_sanitize_request(REQ(), "s1", "chat_completions")
+        for _ in range(50):
+            if any(e["kind"] == "decide_shadow" for e in _audit(cloak)):
+                break
+            _t.sleep(0.1)
+        sh = [json.loads(e["detail"]) for e in _audit(cloak) if e["kind"] == "decide_shadow"]
+        assert sh and sh[0]["primary"] == "jev" and sh[0]["shadow"] == "local" and sh[0]["shadow_answers"]
+        assert "דנה" not in json.dumps(sh, ensure_ascii=False)
+    finally:
+        jev.close(); loc.close()

@@ -294,16 +294,24 @@ def _jev_residual(eng, masked_text: str):
         if not getattr(eng.profile, "jev_check", False):
             return None
         from hermescloak import residual as _res
-        r = _res.check(masked_text, eng.profile)
+
+        def _on_shadow(rec):          # both backends' probabilities, nothing else
+            _audit("decide_shadow", json.dumps(rec, ensure_ascii=False))
+
+        r = _res.check(masked_text, eng.profile, on_shadow=_on_shadow)
         if r is None:
             _audit("jev_unavailable", json.dumps({"reason": "no-key"}), every=600)
             return None
         if "error" in r:
+            # the daily cap announces itself once a day; other failures are rate-limited
             _audit("jev_unavailable", json.dumps({"reason": r["error"], "detail": r.get("detail"),
-                                                  "ms": r.get("ms")}), every=60)
+                                                  "backend": r.get("backend"), "ms": r.get("ms")}),
+                   every=0 if r.get("announce") else 60)
             return None
         _audit("jev_residual", json.dumps({"hits": r["hits"], "probs": r["probs"], "ms": r["ms"],
-                                           "model": r.get("model")}, ensure_ascii=False))
+                                           "model": r.get("model"), "backend": r.get("backend"),
+                                           **({"fell_back_from": r["fell_back_from"]} if r.get("fell_back_from") else {})},
+                                          ensure_ascii=False))
         return r
     except Exception as exc:  # noqa: BLE001
         _audit("jev_unavailable", json.dumps({"reason": "error", "detail": repr(exc)[:120]}), every=60)
