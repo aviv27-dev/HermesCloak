@@ -45,8 +45,10 @@ added (scheduled refresh + cache), since the gazetteer is the recall floor. Docu
 file/callable/DB `EntitySource` options.
 
 ### 7. CI + packaging
-GitHub Actions running the 89 tests + the golden-leak suite + the 100-case QA on every push;
-pre-commit (ruff/format); publish to **PyPI** (`pip install hermescloak`) with pinned extras.
+CI already runs the full suite (247 tests, incl. the golden-leak suite and the fictional verdict
+corpus) on Python 3.10–3.13; add 3.14 (hermes' managed runtime) and a job that installs the plugin
+with `hermes plugins install` against current hermes-agent. Pre-commit (ruff/format); PyPI with
+pinned extras (see Visibility & adoption, step 3).
 
 ## Longer-term
 
@@ -62,6 +64,55 @@ the file/callback alerter; a small dashboard for the `enforce_send`/`leftover` s
 A DPIA template and a mapping of HermesCloak's controls to the relevant regimes (e.g. GDPR, Israel's
 PPA AI guidance), making explicit what the filter does and does **not** satisfy — so adopters in
 regulated settings know the policy/vendor-no-train/disclosure pieces they still owe.
+
+## Visibility & adoption
+
+The code is ahead of its discoverability: nothing on the repository page tells a visitor what it
+does in ten seconds, and a hermes user searching for a privacy plugin will not find it.
+
+### Repository topics (GitHub → About → ⚙ Topics)
+`pii` · `privacy` · `pseudonymization` · `anonymization` · `data-protection` · `redaction` ·
+`llm` · `llm-security` · `ai-agents` · `hermes-agent` · `hermes-plugin` · `hebrew` · `nlp` ·
+`legal-tech` · `gdpr`
+
+### Suggested steps, by impact
+
+1. **A short GIF or video of the real thing.** Split screen: on the left, a Telegram chat with the
+   agent ("what is the client's phone in case 2?") and the answer with the real name and number;
+   on the right, the recording proxy's view of the same turn — only `⟦לקוח_1⟧` / `⟦טלפון_1⟧` left
+   the machine — then `apply_hooks.py --verify` going green. That contrast is the product in one
+   image. Needs a capture on the real deployment (fictional data only); a 20-second shot list can
+   be written on request.
+2. **English-first surface.** README opens with an English one-liner and quickstart; token labels
+   configurable to English (`⟦CLIENT_1⟧`, item 2 above) and English names caught (item 1). Hebrew
+   stays the differentiator, not the barrier.
+3. **Release v0.2.0 with one-command install.** A GitHub Release with a changelog; install is
+   already one command (`hermes plugins install aviv27-dev/HermesCloak --enable`). Then submit to
+   **the Hermes plugin catalog** (`plugin-catalog/` in hermes-agent, see its
+   `catalog-submission.md`) so `hermes plugins search pii` finds it — hermes' equivalent of Homebrew.
+   PyPI (`pip install hermescloak`) after that, for non-hermes users of the library.
+4. **A ready adapter for other agents.** The engine is agent-agnostic; a small adapter for one more
+   popular agent stack (e.g. an OpenAI-compatible proxy mode, or a LangChain / LiteLLM callback)
+   widens the audience beyond hermes users.
+5. **Social preview image** (Settings → General → Social preview): the before/after token picture,
+   so a shared link explains itself.
+6. **Post in the communities where the users are.**
+   * Show HN on Hacker News ("reversible PII pseudonymization for LLM agents, Hebrew-first").
+   * Reddit: r/LocalLLaMA, r/privacy, r/LegalTech, r/selfhosted.
+   * Nous Research Discord, `#plugins-skills-and-skins` (the channel hermes' plugin guide points to).
+   * Israeli legal-tech and privacy circles — the first adopters are law and accounting offices.
+7. **Contribute back to hermes-agent.** This work found a real upstream gap: when a plugin fails to
+   import, hermes logs a warning and carries on, so a privacy plugin can vanish silently (HermesCloak
+   now ships its own fail-closed stand-in). Proposing a `plugins.required` / fail-closed option
+   upstream as a PR both fixes it for every security plugin and introduces the project to hermes'
+   maintainers.
+8. **Awesome lists:** awesome-llm-security, awesome-privacy, awesome-ai-agents, and any
+   awesome-hermes list.
+9. **Trust signals on the repository:** the CI status badge in the README (tests already run on
+   Python 3.10–3.13 — add 3.14, which hermes' runtime uses); `CONTRIBUTING.md`; issue templates
+   (bug report / false negative — "a value that leaked" — with a "use fictional data only"
+   reminder); `SECURITY.md` with a private disclosure address, which a privacy tool especially
+   needs; `CHANGELOG.md`.
 
 ---
 Contributions welcome. The non-negotiables for any change: keep the core dependency-light, keep

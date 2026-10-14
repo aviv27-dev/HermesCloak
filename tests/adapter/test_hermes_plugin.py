@@ -247,3 +247,165 @@ def test_backstops_registered_and_restore(env):
     st = plugin.status()
     log = (cloak / "audit.log").read_text(encoding="utf-8")
     assert "backstop_restore" in log and '\\"self_test\\": \\"ok\\"' in log
+
+
+# ---- the directory-plugin wrapper and the managed-runtime check
+
+def test_repo_root_is_a_hermes_directory_plugin():
+    import importlib.util
+    import os
+    import yaml
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    man = yaml.safe_load(open(os.path.join(root, "plugin.yaml"), encoding="utf-8"))
+    assert man["name"] == "hermescloak"
+    # hermes imports <plugin>/__init__.py under a synthetic package name with the plugin dir as its path
+    spec = importlib.util.spec_from_file_location("hermes_plugins.hermescloak", os.path.join(root, "__init__.py"),
+                                                  submodule_search_locations=[root])
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    from hermescloak.hermes_plugin import register as real
+    assert mod._impl() is real
+
+
+def _verify_mod():
+    import importlib.util
+    import os
+    p = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                     "install", "apply_hooks.py")
+    spec = importlib.util.spec_from_file_location("apply_hooks_under_test", p)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def _fake_runtime(home, importable):
+    import os
+    import stat
+    py = home / "installs" / "k" / "environments" / "g" / "venv" / "bin" / "python"
+    py.parent.mkdir(parents=True)
+    py.write_text("#!/bin/sh\nexit %d\n" % (0 if importable else 1))
+    py.chmod(py.stat().st_mode | stat.S_IEXEC)
+    return py
+
+
+def test_verify_probes_the_managed_runtime_not_this_python(tmp_path, monkeypatch, capsys):
+    m = _verify_mod()
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _fake_runtime(tmp_path, importable=False)
+    assert m._check_runtime({}) is False
+    out = capsys.readouterr().out
+    assert "MISSING" in out and "managed runtime" in out and "hermes plugins install" in out
+
+
+def test_verify_ok_when_the_managed_runtime_imports_it(tmp_path, monkeypatch, capsys):
+    m = _verify_mod()
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _fake_runtime(tmp_path, importable=True)
+    assert m._check_runtime({}) is True
+    assert "[OK ] hermescloak importable by hermes' managed runtime" in capsys.readouterr().out
+
+
+def test_verify_flags_host_isolation(tmp_path, monkeypatch, capsys):
+    m = _verify_mod()
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _fake_runtime(tmp_path, importable=True)
+    assert m._check_runtime({"plugins": {"isolation": "host"}}) is False
+    assert "plugins.isolation: host" in capsys.readouterr().out
+
+
+def _root_plugin_module():
+    import importlib.util
+    import os
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    spec = importlib.util.spec_from_file_location("hermes_plugins.hermescloak_t", os.path.join(root, "__init__.py"),
+                                                  submodule_search_locations=[root])
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class _FailsafeCtx:
+    def __init__(self):
+        self.mw = {}
+
+    def register_middleware(self, kind, fn):
+        self.mw.setdefault(kind, []).append(fn)
+
+    def register_hook(self, *a, **k):
+        pass
+
+
+@pytest.mark.parametrize("mode,withheld", [("enforce", True), ("shadow", False), ("off", False)])
+def test_failed_load_is_fail_closed_only_in_enforce(tmp_path, monkeypatch, mode, withheld):
+    mod = _root_plugin_module()
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "cloak").mkdir()
+    (tmp_path / "cloak" / "MODE").write_text(mode)
+
+    def boom():
+        raise ImportError("No module named 'yaml'")
+    monkeypatch.setattr(mod, "_impl", boom)
+    ctx = _FailsafeCtx()
+    mod.register(ctx)
+    [mw] = ctx.mw["llm_request"]
+    req = {"model": "m", "messages": [{"role": "system", "content": "s"}, {"role": "user", "content": "דנה לוי 050-1234567"}],
+           "tools": [{"type": "function"}]}
+    out = mw(request=req, api_mode="chat_completions")
+    log = (tmp_path / "cloak" / "audit.log").read_text(encoding="utf-8")
+    assert "plugin_load_failed" in log
+    if withheld:
+        sent = json.dumps(out["request"], ensure_ascii=False)
+        assert "דנה" not in sent and "050-1234567" not in sent and "tools" not in out["request"]
+        assert out["request"]["messages"][0]["content"].startswith("[HermesCloak: request withheld")
+        assert "blocked_send" in log
+    else:
+        assert out is None
+
+
+def test_failsafe_keeps_each_wire_shape():
+    mod = _root_plugin_module()
+    a = mod._withheld({"model": "m", "system": [{"type": "text", "text": "x"}], "messages": [{"role": "user", "content": "y"}]},
+                      "anthropic_messages")
+    assert a["system"][0]["text"].startswith("[HermesCloak") and a["messages"][0]["role"] == "user"
+    r = mod._withheld({"model": "m", "instructions": "x", "input": [{"role": "user", "content": "y"}]}, "codex_responses")
+    assert r["instructions"].startswith("[HermesCloak") and r["input"][0]["content"].startswith("[HermesCloak") \
+        and "messages" not in r
+    b = mod._withheld({"modelId": "m", "system": [{"text": "x"}], "messages": [{"role": "user", "content": [{"text": "y"}]}]},
+                      "bedrock_converse")
+    assert b["messages"][0]["content"][0]["text"].startswith("[HermesCloak") and b["system"][0]["text"].startswith("[HermesCloak")
+
+
+def test_working_load_registers_the_real_plugin_not_the_failsafe(tmp_path, monkeypatch):
+    mod = _root_plugin_module()
+    got = []
+    monkeypatch.setattr(mod, "_impl", lambda: (lambda ctx: got.append(ctx)))
+    ctx = _FailsafeCtx()
+    mod.register(ctx)
+    assert got == [ctx] and "llm_request" not in ctx.mw
+
+
+def test_failsafe_also_withholds_auxiliary_calls(tmp_path, monkeypatch):
+    """A real run found the session-title call (auxiliary funnel, no llm_request middleware) leaking
+    while only the main turn was withheld."""
+    import sys, types
+    mod = _root_plugin_module()
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "cloak").mkdir()
+    (tmp_path / "cloak" / "MODE").write_text("enforce")
+    seen = []
+    ac = types.ModuleType("agent.auxiliary_client")
+    ac._relay_sync_completion = lambda client, kwargs, *a, **k: seen.append(kwargs) or "ok"
+
+    async def _a(client, kwargs, *a, **k):
+        seen.append(kwargs)
+        return "ok"
+    ac._relay_async_completion = _a
+    agent = types.ModuleType("agent"); agent.__path__ = []
+    monkeypatch.setitem(sys.modules, "agent", agent)
+    monkeypatch.setitem(sys.modules, "agent.auxiliary_client", ac)
+    monkeypatch.setattr(mod, "_impl", lambda: (_ for _ in ()).throw(ImportError("x")))
+    mod.register(_FailsafeCtx())
+    ac._relay_sync_completion(None, {"messages": [{"role": "user", "content": "דנה לוי"}]})
+    import asyncio
+    asyncio.run(ac._relay_async_completion(None, {"messages": [{"role": "user", "content": "דנה לוי"}]}))
+    assert len(seen) == 2 and all("דנה" not in json.dumps(k, ensure_ascii=False) for k in seen)

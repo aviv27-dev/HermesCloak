@@ -96,10 +96,16 @@ longer silently remove it. Everything that identifies a deployment (profile, nam
 lives under `$HERMES_HOME/cloak/` — never in this repo.
 
 ```bash
-/path/to/hermes-venv/bin/pip install -e /path/to/HermesCloak
-hermes plugins enable hermescloak            # or: python install/apply_hooks.py --apply
-python install/apply_hooks.py --verify --hermes-root /path/to/hermes-agent
+hermes plugins install aviv27-dev/HermesCloak --enable    # hermes' own installer + package manager
+echo enforce > ~/.hermes/cloak/MODE                       # off | shadow | enforce — read every turn
+hermes gateway restart
+python install/apply_hooks.py --verify --hermes-root /path/to/hermes-agent   # from a clone of this repo
 ```
+
+Current hermes-agent runs from its **own managed Python runtime** (`$HERMES_HOME/installs/…`), so a
+`pip install` into some other venv is not seen by the running agent — install it with
+`hermes plugins install` as above; hermes' package manager then installs this repository's
+`pyproject.toml` into that runtime. (`--verify` checks exactly this.)
 
 - **[docs/INTEGRATION.md](docs/INTEGRATION.md)** — install, configure `$HERMES_HOME/cloak/`, what is
   intercepted (outbound middleware, inbound, streaming, auxiliary calls), verification, known gaps.

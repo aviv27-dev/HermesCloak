@@ -40,12 +40,6 @@ jobs:
           fi
       - name: Resolve model on Ollama Cloud
         run: |
-          ids=$(curl -sf -H "Authorization: Bearer $OLLAMA_API_KEY" https://ollama.com/v1/models \
-                | python3 -c "import json,sys; print('\n'.join(sorted(m['id'] for m in json.load(sys.stdin)['data'])))") || true
-          echo "Available models:"; echo "$ids" | sed 's/^/  /'
-          if [ -n "$ids" ] && ! echo "$ids" | grep -qxF "$MODEL"; then
-            echo "::error::model '$MODEL' is not offered by Ollama Cloud — set the repository variable HC_LIVE_MODEL to one of the names above"
-            exit 1
-          fi
+          python3 install/ci_helpers.py check-model "$MODEL"
       - name: Live sandbox (offline e2e + real model)
         run: bash install/live_sandbox.sh

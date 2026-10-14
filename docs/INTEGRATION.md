@@ -15,14 +15,27 @@ is completely unaffected.
 > `gateway/run.py` / `conversation_loop.py` anchors no longer exist in hermes-agent, so the
 > seams cannot be (and need not be) re-applied.
 
-## 1. Install the package into hermes' Python environment
+## 1. Install the plugin — the hermes way
 
 ```bash
-/path/to/hermes-venv/bin/pip install -e /path/to/HermesCloak
+hermes plugins install aviv27-dev/HermesCloak --enable     # add --yes-deps for a headless install
 ```
 
-This registers the plugin through the `hermes_agent.plugins` entry point. Plugins are opt-in,
-so enable it (step 3).
+This repository is a hermes **directory plugin** (`plugin.yaml` + `__init__.py` at its root).
+`hermes plugins install` clones it to `$HERMES_HOME/plugins/hermescloak`, runs hermes' install-time
+security scan (the tree scans **safe**), asks consent for its one Python dependency (`pyyaml`), and
+hermes' package manager (PM) installs the repository's `pyproject.toml` — the `hermescloak`
+package — into the runtime hermes actually runs.
+
+> **Why not `pip install`?** Current hermes-agent runs every CLI and gateway process from its own
+> PM-managed environment (`$HERMES_HOME/installs/<install>/environments/<generation>/venv`, Python
+> 3.14), not from the venv it was installed into. A `pip install -e` into that venv is invisible to
+> the running agent — the plugin silently does not load. `apply_hooks.py --verify` probes the
+> managed runtime and reports `MISSING` in that case. The pip entry point
+> (`hermes_agent.plugins: hermescloak`) is kept for older hermes and pip-based setups (e.g. running
+> `AIAgent` directly, as `install/e2e_check.py` does).
+
+Updates: `hermes plugins update hermescloak` (PM re-prepares the runtime atomically).
 
 ## 2. Configure the deployment (per agent, NOT in this repo)
 
@@ -124,6 +137,7 @@ fail-safe alarm — investigate).
 | Event | Meaning |
 |-------|---------|
 | `plugin_active` | plugin loaded: per-interception-point status + `self_test` |
+| `plugin_load_failed` | the plugin could not be imported/registered inside hermes (missing dependency, broken install). A stdlib-only stand-in took over: in `enforce` every request — main turn and auxiliary calls — is **withheld** (`blocked_send`, reason `plugin_load_failed`); in `off`/`shadow` nothing changes. `--verify` counts it as an incident. |
 | `enforce_send` | a request was tokenized: `in_request` (distinct tokens per type in THIS request), `in_system_prompt` (the part of those inside the system prompt, e.g. names in SOUL.md), `entities` (cumulative distinct values in the vault, all turns so far — not this turn), `real_values_in_outbound` (must be 0), `replayed` |
 | `jev_residual` | (`jev_check: true`) the typed-decision second opinion on the masked request: `probs` per question (person / contact / identifier still in clear), `hits` ≥ `jev_min_confidence`, `ms`, `model` |
 | `jev_unavailable` | the second opinion did not run: `no-key`, `timeout`, `breaker`, `busy`, `daily-cap`, `error` (+ `backend`) — the turn went on unchecked (rate-limited; the daily cap is announced once a day) |

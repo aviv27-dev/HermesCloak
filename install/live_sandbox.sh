@@ -7,7 +7,7 @@
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="${WORK:-$(mktemp -d -t hermescloak-sandbox-XXXX)}"
-PY="${PY:-3.13}"
+PY="${PY:-3.14}"   # hermes pins for 3.14 and its PM-managed runtime is 3.14: keep the ABI the same
 echo "[sandbox] work dir: $WORK"
 command -v uv >/dev/null || { echo "[sandbox] needs uv (https://docs.astral.sh/uv/)"; exit 2; }
 

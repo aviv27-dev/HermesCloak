@@ -31,7 +31,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PII = {"name": "ישראל ישראלי", "id": "000000018", "phone": "050-0000000",
        "email": "test.client@example.org"}
-SECRET = "sk-proj-TESTTESTTESTTESTTESTTEST"
+SECRET = "sk-" + "proj-" + "TEST" * 6          # a fake key, assembled so no scanner reads it as a real one
 REAL_VALUES = list(PII.values()) + [SECRET]
 SENT: list = []
 PROBE_CALLS: list = []

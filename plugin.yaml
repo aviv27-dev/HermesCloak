@@ -1,0 +1,12 @@
+# hermes-agent directory-plugin manifest. Install with:
+#   hermes plugins install aviv27-dev/HermesCloak --enable
+# Hermes' package manager installs this repository's own pyproject.toml (the `hermescloak` package
+# and its dependencies) into the managed runtime, so nothing is pip-installed by hand.
+name: hermescloak
+version: "0.2.0"
+description: >-
+  Reversible PII pseudonymization for hermes-agent: identifying values (Hebrew-first) are replaced
+  with ⟦TYPE_N⟧ tokens before any request reaches a cloud model and restored on the way back.
+author: aviv27-dev
+manifest_version: 2
+api_version: 1

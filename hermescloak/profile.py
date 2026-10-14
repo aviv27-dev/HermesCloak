@@ -1,5 +1,8 @@
 from dataclasses import dataclass, field
-import yaml
+try:
+    import yaml
+except ImportError:                      # inside hermes: its own YAML module (same safe_load)
+    import hermes_yaml as yaml           # type: ignore[no-redef]
 
 
 @dataclass

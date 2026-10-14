@@ -1,5 +1,14 @@
 # Surviving hermes-agent version updates
 
+## hermes' managed runtime (hermes-agent, October 2026)
+
+hermes now runs from its own package-manager environment under `$HERMES_HOME/installs/`, not from
+the venv it was installed into. An installation made with `pip install -e /path/to/HermesCloak`
+into hermes' venv **stops loading silently** after that update: `plugins.enabled` still lists
+`hermescloak`, but the runtime cannot import it, and older `--verify` versions still said OK.
+Reinstall with `hermes plugins install aviv27-dev/HermesCloak --enable` and confirm with the current
+`--verify` (it probes the managed runtime) and a fresh `plugin_active` + `enforce_send`.
+
 ## Since HermesCloak 0.2 — plugin install (current hermes-agent)
 
 HermesCloak is a hermes **plugin** now ([INTEGRATION.md](INTEGRATION.md)): it modifies no hermes
@@ -13,8 +22,10 @@ python install/apply_hooks.py --verify --hermes-root /path/to/hermes-agent   # s
 grep -E 'plugin_active|seam_missing' $HERMES_HOME/cloak/audit.log | tail -2  # after the gateway restart
 ```
 
-Also re-run `pip install -e /path/to/HermesCloak` if the update recreated hermes' virtualenv
-(`--verify` reports `hermescloak not importable` in that case).
+If `--verify` reports `hermescloak importable by hermes' managed runtime … MISSING`, the running
+agent is **not** protected — typically HermesCloak was pip-installed into a venv the managed runtime
+does not use. Fix: `hermes plugins install aviv27-dev/HermesCloak --enable` (or
+`hermes plugins update hermescloak`), restart the gateway, check `plugin_active` in the audit log.
 
 The existing automation keeps working unchanged — `apply_hooks.py --apply` now just (re-)enables
 the plugin and is idempotent:
@@ -30,8 +41,8 @@ ExecStartPre=-/path/to/hermes-venv/bin/python /path/to/HermesCloak/install/apply
 The old seams anchored on code that no longer exists in hermes-agent (`build_api_kwargs`
 docstring, `assistant_message = normalized`, `agent.stream_delta_callback = _stream_delta_cb`), so
 on current hermes they cannot be applied and **the privacy layer has been off since that update**.
-Steps: install the package into hermes' venv → `hermes plugins enable hermescloak` → restart the
-gateway → check `plugin_active` in the audit log. Leftover seams from an old checkout are harmless
+Steps: `hermes plugins install aviv27-dev/HermesCloak --enable` → restart the gateway → check
+`plugin_active` in the audit log → `apply_hooks.py --verify`. Leftover seams from an old checkout are harmless
 (restore is idempotent) and disappear on the next hermes update.
 
 ## If you can't verify right now

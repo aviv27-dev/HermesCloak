@@ -3,9 +3,11 @@
 
 HermesCloak used to be wired by inserting three source "seams" into the hermes-agent checkout,
 which every hermes update overwrote (and which current hermes-agent no longer even has anchors
-for). Current hermes-agent has a plugin system, so HermesCloak now ships as a plugin
-(``hermescloak.hermes_plugin``, pip entry point ``hermes_agent.plugins: hermescloak``) and this
-script no longer edits any hermes file. The command line is unchanged, so existing systemd
+for). Current hermes-agent has a plugin system, so HermesCloak now ships as a plugin — a
+directory plugin (``plugin.yaml`` + ``__init__.py`` at the repository root, installed with
+``hermes plugins install aviv27-dev/HermesCloak --enable``), with the pip entry point
+``hermes_agent.plugins: hermescloak`` kept for pip-based setups — and this script no longer edits
+any hermes file. The command line is unchanged, so existing systemd
 ``ExecStartPre`` lines and git ``post-merge`` hooks keep working.
 
 Usage:
@@ -15,7 +17,9 @@ Usage:
 
 --apply   runs ``hermes plugins enable hermescloak`` when the ``hermes`` CLI is on PATH, else adds
           ``hermescloak`` to ``plugins.enabled`` in ``$HERMES_HOME/config.yaml`` itself.
---verify  checks (1) the plugin is enabled (and not disabled) in config.yaml, (2) MODE, and
+--verify  checks (1) the plugin is enabled (and not disabled) in config.yaml, (1b) that the runtime
+          hermes actually runs (its PM-managed environment, when there is one) can import it and
+          that plugins.isolation is not ``host``, (2) MODE, and
           (3) with --hermes-root: that every hermes interception point the plugin needs still
           exists in that checkout — run it after each hermes update; a refactor there is reported
           as MISSING instead of silently reducing coverage.
@@ -131,7 +135,7 @@ def _read(path):
         return f.read()
 
 
-INCIDENTS = ("seam_missing", "unfiltered_sent", "blocked_send", "leftover_token", "restore_error",
+INCIDENTS = ("plugin_load_failed", "seam_missing", "unfiltered_sent", "blocked_send", "leftover_token", "restore_error",
              "leaked_original", "config_error", "vault_locked", "vault_key_invalid", "vault_key_unreadable",
              "vault_crypto_unavailable", "vault_write_failed", "vault_corrupt_quarantined",
              "vault_lock_timeout", "vault_error", "ner_down")
@@ -206,6 +210,62 @@ def vault_status():
     return out or ["no vault yet (created on the first tokenized value)"]
 
 
+def _managed_runtimes():
+    """Python interpreters of hermes' PM-managed runtime(s) for this home, newest first.
+
+    Current hermes-agent runs every CLI / gateway process from its own environment under
+    ``$HERMES_HOME/installs/<install>/environments/<generation>/venv`` — NOT from the venv it was
+    pip-installed into — so a plugin package must be visible THERE. (Older hermes ran from its venv.)"""
+    pats = [os.path.join(hermes_home(), "installs", "*", "environments", "*", "venv", "bin", "python"),
+            os.path.join(hermes_home(), "installs", "*", "environments", "*", "venv", "Scripts", "python.exe")]
+    found = [p for pat in pats for p in glob.glob(pat)]
+    return sorted(found, key=lambda p: os.path.getmtime(os.path.dirname(os.path.dirname(p))), reverse=True)
+
+
+def _probe(python):
+    """True if that interpreter can import the plugin (isolated, from a neutral cwd)."""
+    try:
+        r = subprocess.run([python, "-I", "-c", "import hermescloak.hermes_plugin"], cwd=os.path.expanduser("~"),
+                           capture_output=True, text=True, timeout=60)
+        return r.returncode == 0, (r.stderr.strip().splitlines() or [""])[-1][:160]
+    except Exception as exc:  # noqa: BLE001
+        return False, repr(exc)[:160]
+
+
+def _check_runtime(cfg):
+    """Is the plugin importable by the process hermes will actually run?"""
+    ok = True
+    plugin_dir = os.path.join(hermes_home(), "plugins", PLUGIN)
+    as_dir = os.path.isfile(os.path.join(plugin_dir, "plugin.yaml"))
+    print(f"  [info] installed as: " + ("directory plugin (" + plugin_dir + ")" if as_dir
+                                         else "pip package (entry point) — no directory plugin"))
+    runtimes = _managed_runtimes()
+    if runtimes:
+        good, why = _probe(runtimes[0])
+        print(f"  [{'OK ' if good else 'MISSING'}] hermescloak importable by hermes' managed runtime "
+              f"({os.path.dirname(os.path.dirname(os.path.dirname(runtimes[0])))})"
+              + ("" if good else f" — {why}. Install it the hermes way: "
+                 "`hermes plugins install aviv27-dev/HermesCloak --enable` (a pip install into another "
+                 "venv is NOT seen by this runtime)"))
+        ok &= good
+    else:
+        try:
+            import hermescloak.hermes_plugin  # noqa: F401
+            print("  [OK ] hermescloak importable by this python (no PM-managed runtime in this home)")
+        except Exception as exc:
+            print(f"  [MISSING] hermescloak not importable by this python ({exc!r}) — "
+                  "`hermes plugins install aviv27-dev/HermesCloak --enable`, or pip install it into hermes' venv")
+            ok = False
+    iso = str(((cfg.get("plugins") or {}) if isinstance(cfg.get("plugins"), dict) else {})
+              .get("isolation") or "in_process").strip().lower()
+    if iso == "host":
+        print("  [WARN] plugins.isolation: host — third-party plugins run in a separate host process, so "
+              "HermesCloak's inbound / streaming / auxiliary wraps cannot reach the agent. Set "
+              "`plugins.isolation: in_process` (the default) for a protected agent.")
+        ok = False
+    return ok
+
+
 def verify(root, strict=False):
     ok = True
     print(f"HERMES_HOME: {hermes_home()}\n--- HermesCloak verification ---")
@@ -222,13 +282,7 @@ def verify(root, strict=False):
               "Switch it off (`/codex-runtime auto`) for a protected agent.")
         if strict:
             ok = False
-    try:
-        import hermescloak.hermes_plugin  # noqa: F401
-        print("  [OK ] hermescloak importable by this python")
-    except Exception as exc:
-        print(f"  [MISSING] hermescloak not importable by this python ({exc!r}) — "
-              "pip install it into the hermes venv")
-        ok = False
+    ok &= _check_runtime(cfg)
     try:
         mode = open(os.path.join(hermes_home(), "cloak", "MODE"), encoding="utf-8").read().strip()
     except OSError:

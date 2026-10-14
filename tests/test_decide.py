@@ -149,18 +149,34 @@ def test_breaker_opens_after_consecutive_failures_and_recloses():
 
 
 def test_concurrency_cap_waits_inside_the_deadline_else_busy():
-    f = _Fake(delay=0.3)
-    try:
-        d = _decider(f, concurrency=2, timeout_s=0.12)
-        out = []
-        ts = [threading.Thread(target=lambda: out.append(d.decide("x:y", {}, Q))) for _ in range(3)]
-        [t.start() for t in ts]
-        [t.join() for t in ts]
-        reasons = sorted(r.get("reason", "ok") for r in out)
-        assert "busy" in reasons and f.max_inflight <= 2
-    finally:
-        f.close()
+    """Deterministic: two calls hold both slots (blocked in a stub transport) until the third has
+    given up waiting for a slot inside its own deadline and returned "busy"."""
+    release, inflight, peak = threading.Event(), [0], [0]
+    lock = threading.Lock()
 
+    def post(url, body, headers, timeout):
+        with lock:
+            inflight[0] += 1
+            peak[0] = max(peak[0], inflight[0])
+        release.wait(5)
+        with lock:
+            inflight[0] -= 1
+        return 200, {"answers": {}}
+
+    d = D.Decider(env={"OPENROUTER_API_KEY": "k"}, post=post, concurrency=2, timeout_s=0.3)
+    out = {}
+    holders = [threading.Thread(target=lambda n=n: out.__setitem__(n, d.decide("x:y", {}, Q, timeout_s=10)))
+               for n in ("a", "b")]
+    [t.start() for t in holders]
+    for _ in range(200):                     # both slots taken
+        if inflight[0] == 2:
+            break
+        time.sleep(0.01)
+    third = d.decide("x:y", {}, Q)           # waits ≤ 0.3 s for a slot, then gives up
+    release.set()
+    [t.join() for t in holders]
+    assert third["ok"] is False and third["reason"] == "busy"
+    assert out["a"]["ok"] and out["b"]["ok"] and peak[0] == 2
 
 def test_bad_response_body_is_a_typed_failure():
     f = _Fake(raw=b"not json at all")

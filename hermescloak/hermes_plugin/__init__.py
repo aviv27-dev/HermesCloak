@@ -22,8 +22,10 @@ target still exists and the result is written to ``$HERMES_HOME/cloak/audit.log`
 ``python install/apply_hooks.py --verify --hermes-root <checkout>`` checks the same targets
 statically. Every wrap is MODE-scoped and fail-open (see hermes_live).
 
-Enable:  ``pip install -e /path/to/HermesCloak`` into hermes' venv, then
-         ``hermes plugins enable hermescloak`` (or add it to ``plugins.enabled`` in config.yaml).
+Install: ``hermes plugins install aviv27-dev/HermesCloak --enable`` (the repository root is a
+         directory plugin; hermes' package manager installs this package into its managed
+         runtime). The pip entry point ``hermes_agent.plugins: hermescloak`` remains for setups
+         that run hermes from a venv they manage themselves.
 """
 from __future__ import annotations
 

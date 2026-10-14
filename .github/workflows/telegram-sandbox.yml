@@ -49,13 +49,7 @@ jobs:
 
       - name: Resolve model on Ollama Cloud
         run: |
-          ids=$(curl -sf -H "Authorization: Bearer $OLLAMA_API_KEY" https://ollama.com/v1/models \
-                | python3 -c "import json,sys; print('\n'.join(sorted(m['id'] for m in json.load(sys.stdin)['data'])))") || true
-          echo "Available models:"; echo "$ids" | sed 's/^/  /'
-          if [ -n "$ids" ] && ! echo "$ids" | grep -qxF "$MODEL"; then
-            echo "::error::model '$MODEL' is not offered by Ollama Cloud — set the repository variable HC_LIVE_MODEL to one of the names above"
-            exit 1
-          fi
+          python3 install/ci_helpers.py check-model "$MODEL"
       - name: Install hermes-agent + HermesCloak
         run: |
           SANDBOX_INSTALL_ONLY=1 bash install/live_sandbox.sh
@@ -86,7 +80,11 @@ jobs:
           { cat tests/fixtures/verdicts/gazetteer.txt; printf 'ישראל ישראלי\tלקוח\nדנה בדיקה\tלקוח\n'; } \
             > "$HERMES_HOME/cloak/gazetteer.txt"
           cp profiles/example.yaml "$HERMES_HOME/cloak/profile.yaml"
-          "$WORK/venv/bin/python" install/apply_hooks.py --verify --hermes-root "$WORK/hermes-agent" | grep -v "^  \[info\]"
+          # install the plugin THE HERMES WAY: hermes runs from its own PM-managed runtime, which a pip
+          # install into $WORK/venv does not reach. This clones the checked-out commit and lets PM
+          # install its pyproject (hermescloak + deps) into that runtime.
+          "$WORK/venv/bin/hermes" plugins install "file://$GITHUB_WORKSPACE" --yes-deps --enable
+          "$WORK/venv/bin/python" install/apply_hooks.py --verify --strict --hermes-root "$WORK/hermes-agent" | grep -v "^  \[info\]"
 
       - name: Run the gateway for the window (model traffic recorded locally)
         run: |
@@ -111,19 +109,16 @@ jobs:
             echo "::error::gateway did not come up"; ANNOUNCE=0
           fi
           if [ "$ANNOUNCE" = 1 ]; then
-            for id in ${TELEGRAM_ALLOWED_USERS//,/ }; do
-              curl -s -o /dev/null "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-                --data-urlencode "chat_id=$id" \
-                --data-urlencode "text=🧪 HermesCloak sandbox online for ${MINUTES} min (model ${MODEL}, MODE=enforce).
-          יש לי 6 תיקים בדויים (פסקי דין) — כל מה שנשלח למודל עובר דרך HermesCloak ונבדק בסוף.
-          נסה למשל:
-          • אילו תיקים יש לך?
-          • מי הצדדים בתיק 2 ומה מספרי הטלפון שלהם?
-          • סכם את פסק הדין בתיק 3, כולל הכתובות והגוש והחלקה
-          • מה מספר החשבון והרכב שעוקלו בתיק 4?
-          • למי שולח פסק הדין בדוא\"ל בתיק 1?
-          (התשובה הראשונה איטית יותר — המתן לה לפני ההודעה הבאה)" || true
-            done
+            printf '%s\n' "🧪 HermesCloak sandbox online for ${MINUTES} min (model ${MODEL}, MODE=enforce)." \
+              'יש לי 6 תיקים בדויים (פסקי דין) — כל מה שנשלח למודל עובר דרך HermesCloak ונבדק בסוף.' \
+              'נסה למשל:' \
+              '• אילו תיקים יש לך?' \
+              '• מי הצדדים בתיק 2 ומה מספרי הטלפון שלהם?' \
+              '• סכם את פסק הדין בתיק 3, כולל הכתובות והגוש והחלקה' \
+              '• מה מספר החשבון והרכב שעוקלו בתיק 4?' \
+              '• למי שולח פסק הדין בדוא"ל בתיק 1?' \
+              '(התשובה הראשונה איטית יותר — המתן לה לפני ההודעה הבאה)' > "$RUNNER_TEMP/announce.txt"
+            python3 install/ci_helpers.py telegram --file "$RUNNER_TEMP/announce.txt"
           fi
           wait $GW || code=$?
           echo "gateway exited (${code:-0}; 124 = window ended)"
@@ -163,9 +158,5 @@ jobs:
       - name: Sign off
         if: always()
         run: |
-          for id in ${TELEGRAM_ALLOWED_USERS//,/ }; do
-            curl -s -o /dev/null "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-              --data-urlencode "chat_id=$id" \
-              --data-urlencode "text=🧪 HermesCloak sandbox is offline.
-          $(tail -n 1 "$RUNNER_TEMP/leak_scan.txt" 2>/dev/null || echo 'leak scan: n/a')" || true
-          done
+          { echo "🧪 HermesCloak sandbox is offline."; tail -n 1 "$RUNNER_TEMP/leak_scan.txt" 2>/dev/null || echo "leak scan: n/a"; } > "$RUNNER_TEMP/signoff.txt"
+          python3 install/ci_helpers.py telegram --file "$RUNNER_TEMP/signoff.txt"
