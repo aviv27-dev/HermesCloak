@@ -1,0 +1,614 @@
+[
+ {
+  "case": 1,
+  "type": "name (client list)",
+  "value": "עמית גרינברג",
+  "expected": "masked"
+ },
+ {
+  "case": 1,
+  "type": "name (client list)",
+  "value": "שירן ברקוביץ",
+  "expected": "masked"
+ },
+ {
+  "case": 1,
+  "type": "national ID",
+  "value": "517547998",
+  "expected": "masked"
+ },
+ {
+  "case": 1,
+  "type": "national ID",
+  "value": "407346816",
+  "expected": "masked"
+ },
+ {
+  "case": 1,
+  "type": "phone",
+  "value": "058-2918441",
+  "expected": "masked"
+ },
+ {
+  "case": 1,
+  "type": "phone",
+  "value": "050-4593451",
+  "expected": "masked"
+ },
+ {
+  "case": 1,
+  "type": "email",
+  "value": "d7aad7.client1@example.org",
+  "expected": "masked"
+ },
+ {
+  "case": 1,
+  "type": "company number",
+  "value": "510297641",
+  "expected": "masked"
+ },
+ {
+  "case": 1,
+  "type": "credit card",
+  "value": "4580 3093 7504 2608",
+  "expected": "masked"
+ },
+ {
+  "case": 1,
+  "type": "land parcel",
+  "value": "גוש 6383 חלקה 206",
+  "expected": "masked"
+ },
+ {
+  "case": 1,
+  "type": "street address",
+  "value": "דרך השקד 16, אשדוד",
+  "expected": "masked"
+ },
+ {
+  "case": 1,
+  "type": "street address",
+  "value": "שדרות הנרקיסים 45, רמת השרון",
+  "expected": "masked"
+ },
+ {
+  "case": 1,
+  "type": "bank account",
+  "value": "931235",
+  "expected": "masked"
+ },
+ {
+  "case": 1,
+  "type": "vehicle plate",
+  "value": "706-40-602",
+  "expected": "masked"
+ },
+ {
+  "case": 1,
+  "type": "date of birth",
+  "value": "27.07.1980",
+  "expected": "masked"
+ },
+ {
+  "case": 1,
+  "type": "case number",
+  "value": "80953-06-23",
+  "expected": "masked"
+ },
+ {
+  "case": 1,
+  "type": "first name alone",
+  "value": "עמית",
+  "expected": "gap"
+ },
+ {
+  "case": 2,
+  "type": "name (client list)",
+  "value": "איתי ברקוביץ",
+  "expected": "masked"
+ },
+ {
+  "case": 2,
+  "type": "name (NOT in client list)",
+  "value": "דורון שגיא",
+  "expected": "gap"
+ },
+ {
+  "case": 2,
+  "type": "national ID",
+  "value": "712112085",
+  "expected": "masked"
+ },
+ {
+  "case": 2,
+  "type": "national ID",
+  "value": "023081722",
+  "expected": "masked"
+ },
+ {
+  "case": 2,
+  "type": "phone",
+  "value": "054-2734941",
+  "expected": "masked"
+ },
+ {
+  "case": 2,
+  "type": "phone",
+  "value": "053-7648677",
+  "expected": "masked"
+ },
+ {
+  "case": 2,
+  "type": "email",
+  "value": "d799d7.client2@example.org",
+  "expected": "masked"
+ },
+ {
+  "case": 2,
+  "type": "company number",
+  "value": "519982664",
+  "expected": "masked"
+ },
+ {
+  "case": 2,
+  "type": "credit card",
+  "value": "4580 8287 7043 6933",
+  "expected": "masked"
+ },
+ {
+  "case": 2,
+  "type": "land parcel",
+  "value": "גוש 7355 חלקה 20",
+  "expected": "masked"
+ },
+ {
+  "case": 2,
+  "type": "street address",
+  "value": "רחוב המעיין 39, רמת השרון",
+  "expected": "masked"
+ },
+ {
+  "case": 2,
+  "type": "street address",
+  "value": "רחוב המעיין 58, חדרה",
+  "expected": "masked"
+ },
+ {
+  "case": 2,
+  "type": "bank account",
+  "value": "370545",
+  "expected": "masked"
+ },
+ {
+  "case": 2,
+  "type": "vehicle plate",
+  "value": "539-71-517",
+  "expected": "masked"
+ },
+ {
+  "case": 2,
+  "type": "date of birth",
+  "value": "17.06.1979",
+  "expected": "masked"
+ },
+ {
+  "case": 2,
+  "type": "case number",
+  "value": "34224-11-23",
+  "expected": "masked"
+ },
+ {
+  "case": 2,
+  "type": "first name alone",
+  "value": "איתי",
+  "expected": "gap"
+ },
+ {
+  "case": 3,
+  "type": "name (client list)",
+  "value": "רונן ברקוביץ",
+  "expected": "masked"
+ },
+ {
+  "case": 3,
+  "type": "name (client list)",
+  "value": "דורון בן־שושן",
+  "expected": "masked"
+ },
+ {
+  "case": 3,
+  "type": "national ID",
+  "value": "807714563",
+  "expected": "masked"
+ },
+ {
+  "case": 3,
+  "type": "national ID",
+  "value": "426534699",
+  "expected": "masked"
+ },
+ {
+  "case": 3,
+  "type": "phone",
+  "value": "053-7864159",
+  "expected": "masked"
+ },
+ {
+  "case": 3,
+  "type": "phone",
+  "value": "054-8355651",
+  "expected": "masked"
+ },
+ {
+  "case": 3,
+  "type": "email",
+  "value": "d79fd7.client3@example.org",
+  "expected": "masked"
+ },
+ {
+  "case": 3,
+  "type": "company number",
+  "value": "512559469",
+  "expected": "masked"
+ },
+ {
+  "case": 3,
+  "type": "credit card",
+  "value": "4580 6284 9140 0162",
+  "expected": "masked"
+ },
+ {
+  "case": 3,
+  "type": "land parcel",
+  "value": "גוש 6619 חלקה 228",
+  "expected": "masked"
+ },
+ {
+  "case": 3,
+  "type": "street address",
+  "value": "דרך השקד 9, רמת השרון",
+  "expected": "masked"
+ },
+ {
+  "case": 3,
+  "type": "street address",
+  "value": "שדרות הנרקיסים 46, באר שבע",
+  "expected": "masked"
+ },
+ {
+  "case": 3,
+  "type": "bank account",
+  "value": "610197",
+  "expected": "masked"
+ },
+ {
+  "case": 3,
+  "type": "vehicle plate",
+  "value": "233-65-749",
+  "expected": "masked"
+ },
+ {
+  "case": 3,
+  "type": "date of birth",
+  "value": "08.11.1971",
+  "expected": "masked"
+ },
+ {
+  "case": 3,
+  "type": "case number",
+  "value": "90613-07-22",
+  "expected": "masked"
+ },
+ {
+  "case": 3,
+  "type": "first name alone",
+  "value": "רונן",
+  "expected": "gap"
+ },
+ {
+  "case": 4,
+  "type": "name (client list)",
+  "value": "גלעד פלד",
+  "expected": "masked"
+ },
+ {
+  "case": 4,
+  "type": "name (client list)",
+  "value": "דורון מזרחי־לוי",
+  "expected": "masked"
+ },
+ {
+  "case": 4,
+  "type": "national ID",
+  "value": "748074747",
+  "expected": "masked"
+ },
+ {
+  "case": 4,
+  "type": "national ID",
+  "value": "840950562",
+  "expected": "masked"
+ },
+ {
+  "case": 4,
+  "type": "phone",
+  "value": "054-8692050",
+  "expected": "masked"
+ },
+ {
+  "case": 4,
+  "type": "phone",
+  "value": "054-9227334",
+  "expected": "masked"
+ },
+ {
+  "case": 4,
+  "type": "email",
+  "value": "d793d7.client4@example.org",
+  "expected": "masked"
+ },
+ {
+  "case": 4,
+  "type": "company number",
+  "value": "510571953",
+  "expected": "masked"
+ },
+ {
+  "case": 4,
+  "type": "credit card",
+  "value": "4580 0981 8670 4999",
+  "expected": "masked"
+ },
+ {
+  "case": 4,
+  "type": "land parcel",
+  "value": "גוש 6739 חלקה 64",
+  "expected": "masked"
+ },
+ {
+  "case": 4,
+  "type": "street address",
+  "value": "דרך השקד 47, באר שבע",
+  "expected": "masked"
+ },
+ {
+  "case": 4,
+  "type": "street address",
+  "value": "שדרות הנרקיסים 4, מודיעין",
+  "expected": "masked"
+ },
+ {
+  "case": 4,
+  "type": "bank account",
+  "value": "351349",
+  "expected": "masked"
+ },
+ {
+  "case": 4,
+  "type": "vehicle plate",
+  "value": "770-10-486",
+  "expected": "masked"
+ },
+ {
+  "case": 4,
+  "type": "date of birth",
+  "value": "17.11.1977",
+  "expected": "masked"
+ },
+ {
+  "case": 4,
+  "type": "case number",
+  "value": "52353-05-23",
+  "expected": "masked"
+ },
+ {
+  "case": 4,
+  "type": "first name alone",
+  "value": "גלעד",
+  "expected": "gap"
+ },
+ {
+  "case": 5,
+  "type": "name (client list)",
+  "value": "הדס שגיא",
+  "expected": "masked"
+ },
+ {
+  "case": 5,
+  "type": "name (NOT in client list)",
+  "value": "אורית ברקוביץ",
+  "expected": "gap"
+ },
+ {
+  "case": 5,
+  "type": "national ID",
+  "value": "222708406",
+  "expected": "masked"
+ },
+ {
+  "case": 5,
+  "type": "national ID",
+  "value": "306170655",
+  "expected": "masked"
+ },
+ {
+  "case": 5,
+  "type": "phone",
+  "value": "058-5448056",
+  "expected": "masked"
+ },
+ {
+  "case": 5,
+  "type": "phone",
+  "value": "054-7164221",
+  "expected": "masked"
+ },
+ {
+  "case": 5,
+  "type": "email",
+  "value": "d7a1d7.client5@example.org",
+  "expected": "masked"
+ },
+ {
+  "case": 5,
+  "type": "company number",
+  "value": "518569041",
+  "expected": "masked"
+ },
+ {
+  "case": 5,
+  "type": "credit card",
+  "value": "4580 9606 5712 6400",
+  "expected": "masked"
+ },
+ {
+  "case": 5,
+  "type": "land parcel",
+  "value": "גוש 7622 חלקה 264",
+  "expected": "masked"
+ },
+ {
+  "case": 5,
+  "type": "street address",
+  "value": "דרך השקד 44, רמת השרון",
+  "expected": "masked"
+ },
+ {
+  "case": 5,
+  "type": "street address",
+  "value": "דרך השקד 26, קריית מוצקין",
+  "expected": "masked"
+ },
+ {
+  "case": 5,
+  "type": "bank account",
+  "value": "355044",
+  "expected": "masked"
+ },
+ {
+  "case": 5,
+  "type": "vehicle plate",
+  "value": "306-24-161",
+  "expected": "masked"
+ },
+ {
+  "case": 5,
+  "type": "date of birth",
+  "value": "19.09.1985",
+  "expected": "masked"
+ },
+ {
+  "case": 5,
+  "type": "case number",
+  "value": "54842-06-23",
+  "expected": "masked"
+ },
+ {
+  "case": 5,
+  "type": "first name alone",
+  "value": "הדס",
+  "expected": "gap"
+ },
+ {
+  "case": 6,
+  "type": "name (client list)",
+  "value": "ענבל סויסה",
+  "expected": "masked"
+ },
+ {
+  "case": 6,
+  "type": "name (client list)",
+  "value": "ניר גרינברג",
+  "expected": "masked"
+ },
+ {
+  "case": 6,
+  "type": "national ID",
+  "value": "811485903",
+  "expected": "masked"
+ },
+ {
+  "case": 6,
+  "type": "national ID",
+  "value": "160630737",
+  "expected": "masked"
+ },
+ {
+  "case": 6,
+  "type": "phone",
+  "value": "058-9041840",
+  "expected": "masked"
+ },
+ {
+  "case": 6,
+  "type": "phone",
+  "value": "050-3193590",
+  "expected": "masked"
+ },
+ {
+  "case": 6,
+  "type": "email",
+  "value": "d79cd7.client6@example.org",
+  "expected": "masked"
+ },
+ {
+  "case": 6,
+  "type": "company number",
+  "value": "515417806",
+  "expected": "masked"
+ },
+ {
+  "case": 6,
+  "type": "credit card",
+  "value": "4580 8209 1317 2590",
+  "expected": "masked"
+ },
+ {
+  "case": 6,
+  "type": "land parcel",
+  "value": "גוש 7481 חלקה 221",
+  "expected": "masked"
+ },
+ {
+  "case": 6,
+  "type": "street address",
+  "value": "רחוב האלון 29, קריית מוצקין",
+  "expected": "masked"
+ },
+ {
+  "case": 6,
+  "type": "street address",
+  "value": "רחוב האלון 77, מודיעין",
+  "expected": "masked"
+ },
+ {
+  "case": 6,
+  "type": "bank account",
+  "value": "881595",
+  "expected": "masked"
+ },
+ {
+  "case": 6,
+  "type": "vehicle plate",
+  "value": "719-19-499",
+  "expected": "masked"
+ },
+ {
+  "case": 6,
+  "type": "date of birth",
+  "value": "21.05.1980",
+  "expected": "masked"
+ },
+ {
+  "case": 6,
+  "type": "case number",
+  "value": "14626-09-24",
+  "expected": "masked"
+ },
+ {
+  "case": 6,
+  "type": "first name alone",
+  "value": "ענבל",
+  "expected": "gap"
+ }
+]

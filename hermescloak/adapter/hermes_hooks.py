@@ -2,7 +2,9 @@
 hermes and does NOT wire anything. Actual installation (deployment into a live agent) is a
 separate, explicitly-approved step.
 
-Verified seams (hermes-agent, 2026-06-18):
+NOTE: the live integration is now the hermes PLUGIN (hermescloak.hermes_plugin); these generic
+factories are kept for custom embeddings. Historical seam notes (hermes-agent, 2026-06-18 — these
+anchors no longer exist in current hermes-agent):
   OUTBOUND  agent/chat_completion_helpers.py :: build_api_kwargs (~L555)
             single transport-agnostic choke point (covers chat-completions, anthropic, codex,
             bedrock). Tokenize a COPY of the messages here, before transport.build_kwargs().

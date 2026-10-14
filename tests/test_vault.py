@@ -34,3 +34,22 @@ def test_has_entries():
     assert v.is_empty()
     v.tokenize("x", "לקוח")
     assert not v.is_empty()
+
+
+def test_concurrent_tokenize_never_issues_one_token_twice():
+    import threading
+    v = Vault()
+    vals = [f"value-{i}" for i in range(400)]
+
+    def worker(chunk):
+        for x in chunk:
+            v.tokenize(x, "T")
+
+    threads = [threading.Thread(target=worker, args=(vals[i::8],)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    tokens = [v.tokenize(x, "T") for x in vals]
+    assert len(set(tokens)) == len(vals)
+    assert all(v.restore_token(t) == x for t, x in zip(tokens, vals))

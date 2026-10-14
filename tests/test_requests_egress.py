@@ -95,3 +95,15 @@ def test_kill_switch(tmp_path, fake_requests, monkeypatch):
     assert re_mod.install(home) is False                  # disabled → not patched
     sessions.Session().request("POST", "https://x", json={"c": "⟦מזהה_1⟧"})
     assert sent["json"] == {"c": "⟦מזהה_1⟧"}              # token left as-is (patch off)
+
+
+def test_json_body_value_with_quotes_and_backslash(tmp_path, fake_requests):
+    """A restored value containing `"` or `\\` used to break the re-parsed JSON dump, so the
+    request silently went out still carrying the token."""
+    home = str(tmp_path)
+    real = 'Acme "Holdings" C:\\clients'
+    tok = _seed(home, real, "לקוח")
+    _, sessions, sent, re_mod = fake_requests
+    re_mod.install(home)
+    sessions.Session().request("POST", "https://x", json={"to": [tok], "n": 3})
+    assert sent["json"] == {"to": [real], "n": 3}

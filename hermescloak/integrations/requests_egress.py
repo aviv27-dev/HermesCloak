@@ -70,14 +70,27 @@ def _restore_blob(d, home):
     return d, False
 
 
+def _restore_leaves(obj, home):
+    if isinstance(obj, str):
+        return _restore(obj, home) if "⟦" in obj else obj
+    if isinstance(obj, list):
+        return [_restore_leaves(x, home) for x in obj]
+    if isinstance(obj, tuple):
+        return tuple(_restore_leaves(x, home) for x in obj)
+    if isinstance(obj, dict):
+        return {k: _restore_leaves(v, home) for k, v in obj.items()}
+    return obj
+
+
 def _restore_body(kwargs, home):
     """Restore ⟦tokens⟧ inside json=/data= bodies. Returns True if anything changed."""
     changed = False
     j = kwargs.get("json")
     if j is not None:
-        dumped = _json.dumps(j, ensure_ascii=False)
-        if "⟦" in dumped:
-            kwargs["json"] = _json.loads(_restore(dumped, home))
+        if "⟦" in _json.dumps(j, ensure_ascii=False):
+            # restore string LEAVES, not the dumped text: a real value containing a quote or a
+            # backslash used to make the re-parsed JSON invalid → the request went out with tokens
+            kwargs["json"] = _restore_leaves(j, home)
             changed = True
     d = kwargs.get("data")
     if isinstance(d, (str, bytes)):
