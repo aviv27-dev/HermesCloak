@@ -1,0 +1,38 @@
+$ hermes hermescloak verify
+HERMES_HOME: ~/.hermes
+--- HermesCloak verification ---
+  [OK ] plugin enabled in config.yaml (plugins.enabled)
+  [info] installed as: directory plugin (~/.hermes/plugins/hermescloak)
+  [OK ] hermescloak loads in hermes' managed runtime (~/.hermes/installs/…/environments/…)
+  [OK ] shared runtime … contains no hermescloak package
+  [info] MODE = enforce
+--- interception points in ~/.hermes/hermes-agent ---
+  [OK ] outbound: llm_request middleware is applied  (agent/turn_api_request.py)
+  [OK ] outbound: middleware API  (hermes_cli/middleware.py)
+  [OK ] inbound: transport registry  (agent/transports/__init__.py)
+  [OK ] inbound: NormalizedResponse  (agent/transports/types.py)
+  [OK ] streaming: _fire_stream_delta  (agent/stream_delivery.py)
+  [OK ] streaming: _emit_stream_end  (agent/stream_delivery.py)
+  [OK ] auxiliary: sync completion funnel  (agent/auxiliary_client.py)
+  [OK ] auxiliary: async completion funnel  (agent/auxiliary_client.py)
+--- vault ---
+  no vault yet (created on the first tokenized value)
+--- audit (last 24h) ---
+  [OK ] last plugin load 2026-10-16T15:46:35+0000: all interception points + self-test ok
+  [info] events: plugin_active×1
+--- protected ✓ (confirm on a live turn: plugin_active + enforce_send in $HERMES_HOME/cloak/audit.log) ---
+
+$ hermes hermescloak test
+--- openai ---
+  [OK ] cloud received requests (tool loop ran)
+  [OK ] no real value in ANY cloud-bound request
+  [OK ] tokens reached the cloud
+  [OK ] tool executed with REAL values
+  [OK ] final reply restored
+  [OK ] streamed reply restored
+  [OK ] model turn replayed byte-identical
+--- audit ---
+  [OK ] plugin_active, no seam_missing
+  [OK ] self-test ok
+  [OK ] no restore errors / leftovers / unfiltered sends
+--- PROTECTED ✓ ---
