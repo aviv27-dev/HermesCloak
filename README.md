@@ -223,7 +223,7 @@ HermesCloak is **risk reduction, not a guarantee and not a compliance certificat
 
 ## Security
 
-Found a way for a real value to reach the cloud? Please report it privately; see [SECURITY.md](SECURITY.md).
+Found a way for a real value to reach the cloud? Please report it privately; see [SECURITY.md](SECURITY.md). Release history: [CHANGELOG.md](CHANGELOG.md).
 
 ## License & attribution
 
