@@ -28,7 +28,7 @@ class Profile:
     jev_action: str = "audit"          # "audit" (log only) | "block" (withhold the request, like fail_mode closed)
     jev_timeout_s: float = 3.0
     jev_max_chars: int = 600           # level B: at most this much (masked) text per call
-    decide_backend: str = "jev"        # "jev" (OpenRouter) | "local" (the office model, /v1/systemone)
+    decide_backend: str = "jev"        # "jev" (OpenRouter) | "local" (your own server, /v1/systemone)
     decide_shadow: bool = False        # also ask the other backend in the background and audit both
 
     @classmethod

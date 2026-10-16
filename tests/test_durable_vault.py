@@ -95,3 +95,25 @@ def test_engine_with_durable_vault_roundtrip_across_restart(tmp_path):
     restored, report = e2.restore_inbound({"content": sent, "tool_calls": []})
     assert "שירה לוי" in restored["content"] and "a@b.co.il" in restored["content"]
     assert report.leftover == []                        # the leftover bug is gone
+
+
+def test_key_set_but_cryptography_missing_never_writes_in_clear(tmp_path, monkeypatch):
+    """Documented in docs/INSTALL.md: with an encryption key configured and no `cryptography`
+    the vault goes memory-only (audited) — tokens still work, nothing is written to disk."""
+    import builtins
+    from hermescloak.durable_vault import DurableVault
+    real_import = builtins.__import__
+
+    def no_crypto(name, *a, **k):
+        if name.startswith("cryptography"):
+            raise ImportError("No module named 'cryptography'")
+        return real_import(name, *a, **k)
+    monkeypatch.setattr(builtins, "__import__", no_crypto)
+    path = str(tmp_path / "v.json")
+    v = DurableVault(path, key="x" * 44)
+    tok = v.tokenize("דנה לוי", "לקוח")
+    assert v.memory_only and "vault_crypto_unavailable" in v.events
+    assert v.restore_token(tok) == "דנה לוי"
+    v.save()
+    leftovers = [p for p in tmp_path.iterdir() if p.is_file() and p.stat().st_size and not p.name.endswith(".lock")]
+    assert not any("דנה" in p.read_text(encoding="utf-8", errors="ignore") for p in leftovers), leftovers

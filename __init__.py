@@ -1,9 +1,11 @@
 """hermes-agent directory-plugin entry: this repository IS the plugin.
 
 hermes imports this file when the plugin is installed with ``hermes plugins install
-aviv27-dev/HermesCloak`` (or copied to ``~/.hermes/plugins/hermescloak``) and enabled. Hermes' package
-manager installs the ``hermescloak`` package from this repository's pyproject.toml into the managed
-runtime; when it has not (a manual copy, ``--no-deps``), the package is imported from this checkout.
+aviv27-dev/HermesCloak`` and enabled. ``plugin.yaml`` declares ``python_runtime: external``, so hermes'
+package manager installs NOTHING for it and never rebuilds the runtime environment it shares between
+agents. The ``hermescloak`` package is loaded straight from this plugin directory (its only third-party
+need, YAML, is met by hermes' own ``hermes_yaml``). The repository root is NOT put on ``sys.path``, so
+its ``tests`` / ``install`` / ``demo`` folders can never shadow another module.
 
 FAIL-SAFE LOAD. hermes treats a plugin that fails to import as "not loaded" and carries on — which,
 for a privacy filter, means requests leave unfiltered while ``plugins.enabled`` still lists it. So if
@@ -22,14 +24,37 @@ _NOTICE = ("[HermesCloak: request withheld — the privacy plugin failed to load
            "to send unfiltered.]")
 
 
-def _impl():
+_HERE = _os.path.dirname(_os.path.abspath(__file__))
+
+
+def _load_package():
+    """Import ``hermescloak`` from THIS plugin directory (the version that was installed), even when an
+    older copy is importable elsewhere — e.g. one a previous install left in hermes' shared runtime."""
+    import importlib.util
+    pkg_dir = _os.path.join(_HERE, "hermescloak")
+    init = _os.path.join(pkg_dir, "__init__.py")
+    if not _os.path.isfile(init):                 # pip-layout setup: no source tree beside this file
+        import hermescloak
+        return hermescloak
+    have = _sys.modules.get("hermescloak")
+    if have is not None and _os.path.dirname(_os.path.abspath(getattr(have, "__file__", "") or "")) == pkg_dir:
+        return have
+    for name in [n for n in _sys.modules if n == "hermescloak" or n.startswith("hermescloak.")]:
+        del _sys.modules[name]                    # drop a foreign copy before loading ours
+    spec = importlib.util.spec_from_file_location("hermescloak", init, submodule_search_locations=[pkg_dir])
+    mod = importlib.util.module_from_spec(spec)
+    _sys.modules["hermescloak"] = mod
     try:
-        from hermescloak.hermes_plugin import register as _register
-    except ImportError:
-        here = _os.path.dirname(_os.path.abspath(__file__))
-        if here not in _sys.path:
-            _sys.path.insert(0, here)
-        from hermescloak.hermes_plugin import register as _register
+        spec.loader.exec_module(mod)
+    except BaseException:
+        _sys.modules.pop("hermescloak", None)
+        raise
+    return mod
+
+
+def _impl():
+    _load_package()
+    from hermescloak.hermes_plugin import register as _register
     return _register
 
 

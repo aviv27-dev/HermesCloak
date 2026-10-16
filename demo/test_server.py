@@ -139,8 +139,7 @@ def main():
     import argparse
     ap = argparse.ArgumentParser(description="HermesCloak browser demo/test server")
     ap.add_argument("--host", default="127.0.0.1")
-    # 8770: the original default 8765 is taken by the Tamar agent service on the
-    # AGLO host; 8770 is free here. Override with --port for other environments.
+    # 8770 avoids ports commonly taken by agent services. Override with --port.
     ap.add_argument("--port", type=int, default=8770)
     args = ap.parse_args()
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)

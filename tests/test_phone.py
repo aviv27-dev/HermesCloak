@@ -5,11 +5,11 @@ from hermescloak.phone import CANDIDATE, normalize
 
 
 @pytest.mark.parametrize("raw", [
-    "+972547765611", "+972-54-776-5611", "972-54-7765611", "972547765611", "00972547765611",
-    "+972 (0)54 776 5611", "054-7765611", "054 776 5611", "0547765611", "054.776.5611",
+    "+972520000002", "+972-52-000-0002", "972-52-0000002", "972520000002", "00972520000002",
+    "+972 (0)52 000 0002", "052-0000002", "052 000 0002", "0520000002", "052.000.0002",
 ])
 def test_every_spelling_of_one_mobile_gives_one_nsn(raw):
-    assert normalize(raw) == "547765611"
+    assert normalize(raw) == "520000002"
 
 
 @pytest.mark.parametrize("raw,nsn", [
@@ -29,7 +29,7 @@ def test_dates_amounts_case_numbers_ids_are_not_phones(raw):
 
 
 def test_candidate_finds_each_spelling_inside_text():
-    text = ("נייד +972 (0)54-776-5611, משרד 03-1234567, פקס 00972-3-7654321 ו-054.776.5611; "
+    text = ("נייד +972 (0)52-000-0002, משרד 03-1234567, פקס 00972-3-7654321 ו-052.000.0002; "
             "תאריך 05.10.2026, סך 50,000 ש\"ח")
     found = [m.group(0) for m in CANDIDATE.finditer(text) if normalize(m.group(0))]
-    assert found == ["+972 (0)54-776-5611", "03-1234567", "00972-3-7654321", "054.776.5611"]
+    assert found == ["+972 (0)52-000-0002", "03-1234567", "00972-3-7654321", "052.000.0002"]

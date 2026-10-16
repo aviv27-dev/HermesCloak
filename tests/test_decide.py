@@ -192,7 +192,7 @@ def test_health_never_carries_the_key(fake):
     assert "k-test" not in json.dumps(h) and h["has_key"] is True
 
 
-# ---- the office's own decision model as a backend (AGLO-RAG train/decide_model.py serve)
+# ---- a self-hosted decision model as a backend (/v1/systemone)
 
 class _FakeLocal(_Fake):
     """Speaks /v1/systemone: {model, keep_alive, state, questions} → {answers} (no model key)."""

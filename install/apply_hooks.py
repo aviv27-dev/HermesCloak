@@ -70,6 +70,15 @@ def hermes_root(cli):
             or os.path.join(os.getcwd(), "hermes-agent"))
 
 
+def _yaml():
+    """PyYAML, or hermes' own YAML module inside a stock hermes runtime (which has no PyYAML)."""
+    try:
+        import yaml
+    except ImportError:
+        import hermes_yaml as yaml
+    return yaml
+
+
 def _config_path():
     return os.path.join(hermes_home(), "config.yaml")
 
@@ -78,7 +87,7 @@ def _load_config():
     p = _config_path()
     if not os.path.exists(p):
         return {}
-    import yaml
+    yaml = _yaml()
     with open(p, encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
 
@@ -93,7 +102,7 @@ def _plugin_lists(cfg):
 def _enable_in_config():
     """Fallback when the hermes CLI is unavailable: add to plugins.enabled (keeps other keys;
     note PyYAML drops comments — prefer `hermes plugins enable`)."""
-    import yaml
+    yaml = _yaml()
     cfg = _load_config()
     plugins = cfg.setdefault("plugins", {}) or {}
     cfg["plugins"] = plugins
@@ -222,11 +231,23 @@ def _managed_runtimes():
     return sorted(found, key=lambda p: os.path.getmtime(os.path.dirname(os.path.dirname(p))), reverse=True)
 
 
-def _probe(python):
-    """True if that interpreter can import the plugin (isolated, from a neutral cwd)."""
+_PROBE_DIR_PLUGIN = (
+    "import importlib.util, sys\n"
+    "p = sys.argv[1]\n"
+    "spec = importlib.util.spec_from_file_location('hermescloak_verify_probe', p + '/__init__.py',"
+    " submodule_search_locations=[p])\n"
+    "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); m._impl()\n")
+
+
+def _probe(python, plugin_dir=None):
+    """True if that interpreter can load the plugin the way hermes will (isolated, neutral cwd): through
+    the directory plugin's own loader when there is one, else as an installed package."""
+    if plugin_dir:
+        cmd = [python, "-I", "-c", _PROBE_DIR_PLUGIN, plugin_dir]
+    else:
+        cmd = [python, "-I", "-c", "import hermescloak.hermes_plugin"]
     try:
-        r = subprocess.run([python, "-I", "-c", "import hermescloak.hermes_plugin"], cwd=os.path.expanduser("~"),
-                           capture_output=True, text=True, timeout=60)
+        r = subprocess.run(cmd, cwd=os.path.expanduser("~"), capture_output=True, text=True, timeout=60)
         return r.returncode == 0, (r.stderr.strip().splitlines() or [""])[-1][:160]
     except Exception as exc:  # noqa: BLE001
         return False, repr(exc)[:160]
@@ -241,13 +262,23 @@ def _check_runtime(cfg):
                                          else "pip package (entry point) — no directory plugin"))
     runtimes = _managed_runtimes()
     if runtimes:
-        good, why = _probe(runtimes[0])
-        print(f"  [{'OK ' if good else 'MISSING'}] hermescloak importable by hermes' managed runtime "
+        good, why = _probe(runtimes[0], plugin_dir if as_dir else None)
+        print(f"  [{'OK ' if good else 'MISSING'}] hermescloak loads in hermes' managed runtime "
               f"({os.path.dirname(os.path.dirname(os.path.dirname(runtimes[0])))})"
               + ("" if good else f" — {why}. Install it the hermes way: "
                  "`hermes plugins install aviv27-dev/HermesCloak --enable` (a pip install into another "
                  "venv is NOT seen by this runtime)"))
         ok &= good
+        env = os.path.dirname(os.path.dirname(os.path.dirname(runtimes[0])))
+        sp = glob.glob(os.path.join(env, "venv", "lib", "python*", "site-packages")) or \
+            glob.glob(os.path.join(env, "venv", "Lib", "site-packages"))
+        inside = sorted({n for d in sp for n in os.listdir(d) if "hermescloak" in n.lower()})
+        if inside:
+            print(f"  [WARN] the SHARED runtime ({os.path.basename(env)}) contains {', '.join(inside)} — left by a "
+                  "0.2.0 install (pip or package manager). Inert for this plugin, which loads its own copy, but "
+                  "every agent's runtime carries it: `hermes pm install` publishes a runtime without it")
+        else:
+            print(f"  [OK ] shared runtime {os.path.basename(env)} contains no hermescloak package")
     else:
         try:
             import hermescloak.hermes_plugin  # noqa: F401

@@ -17,25 +17,25 @@ is completely unaffected.
 
 ## 1. Install the plugin — the hermes way
 
+**→ [INSTALL.md](INSTALL.md)** (install, test, remove).
+
 ```bash
-hermes plugins install aviv27-dev/HermesCloak --enable     # add --yes-deps for a headless install
+hermes plugins install aviv27-dev/HermesCloak --enable
 ```
 
-This repository is a hermes **directory plugin** (`plugin.yaml` + `__init__.py` at its root).
-`hermes plugins install` clones it to `$HERMES_HOME/plugins/hermescloak`, runs hermes' install-time
-security scan (the tree scans **safe**), asks consent for its one Python dependency (`pyyaml`), and
-hermes' package manager (PM) installs the repository's `pyproject.toml` — the `hermescloak`
-package — into the runtime hermes actually runs.
+This repository is a hermes **directory plugin** (`plugin.yaml` + `__init__.py` at its root), cloned
+to `$HERMES_HOME/plugins/hermescloak`. Its manifest declares `python_runtime: external`, so hermes'
+package manager installs nothing and never rebuilds the runtime environment it shares between agents.
+The plugin's `__init__.py` loads the `hermescloak` package from the plugin directory by path. It
+never adds the repository root to `sys.path`, so `tests/`, `install/` and the rest cannot shadow
+other modules. YAML comes from PyPI's `pyyaml` when present, else from hermes' own `hermes_yaml`.
 
 > **Why not `pip install`?** Current hermes-agent runs every CLI and gateway process from its own
 > PM-managed environment (`$HERMES_HOME/installs/<install>/environments/<generation>/venv`, Python
-> 3.14), not from the venv it was installed into. A `pip install -e` into that venv is invisible to
-> the running agent — the plugin silently does not load. `apply_hooks.py --verify` probes the
-> managed runtime and reports `MISSING` in that case. The pip entry point
-> (`hermes_agent.plugins: hermescloak`) is kept for older hermes and pip-based setups (e.g. running
-> `AIAgent` directly, as `install/e2e_check.py` does).
-
-Updates: `hermes plugins update hermescloak` (PM re-prepares the runtime atomically).
+> 3.14), not from the venv it was installed into, so a `pip install -e` there is invisible to the
+> running agent. Letting PM install the package instead (0.2.0) put HermesCloak into the runtime
+> **shared by every agent**. The pip entry point (`hermes_agent.plugins: hermescloak`) remains for
+> setups that run `AIAgent` from a venv they manage themselves.
 
 ## 2. Configure the deployment (per agent, NOT in this repo)
 
@@ -73,7 +73,7 @@ audited.
 hermes plugins enable hermescloak
 # or, equivalently (also what systemd/post-merge automation should call):
 python install/apply_hooks.py --apply
-python install/apply_hooks.py --verify --hermes-root /path/to/hermes-agent
+hermes hermescloak verify
 ```
 
 Restart the gateway so the agent process loads the plugin.
@@ -154,10 +154,11 @@ fail-safe alarm — investigate).
 load, incidents in the last 24 h) and exits non-zero on any incident — wire it to cron/monitoring.
 
 For an end-to-end proof on your hermes version (a real agent turn against a local fake
-"cloud" that records what it receives; uses a throwaway HERMES_HOME):
+"cloud" that records what it receives; a throwaway home under `~/.hermes/profiles/`, deleted
+afterwards):
 
 ```bash
-/path/to/hermes-venv/bin/python install/e2e_check.py --hermes-root /path/to/hermes-agent
+hermes hermescloak test        # = <hermes' python> install/e2e_check.py, run inside hermes' runtime
 ```
 
 ## Not covered (know these)
@@ -196,7 +197,7 @@ calibrated yes/no answers, ~0.3–0.6 s, via OpenRouter `POST /api/alpha/decisio
 questions: is a private person's name / a personal contact detail / a personal identifier still in
 clear. Answers ≥ `jev_min_confidence` are hits; `jev_action: audit` logs them (`jev_residual`),
 `jev_action: block` withholds the request like `fail_mode: closed`. At most `jev_max_chars` (default
-600 — the "level B" cap the office approved for Jev) of the most recent masked text go per call.
+600) of the most recent masked text go per call.
 Guards (`hermescloak/decide.py`): `jev_timeout_s` (default 3 s) then the turn goes on unchecked, a
 circuit breaker per backend (3 failures → 10 min off), at most 2 calls in flight, a daily cap that
 announces itself once (`jev_unavailable` with `daily-cap`), no key → nothing sent, never raises. Off by
@@ -204,9 +205,9 @@ default: a second vendor sees the masked text. Measure it on your own data befor
 (`install/jev_corpus_check.py`).
 
 **Two backends, one door.** `decide_backend: jev` (default) or `local`: a server speaking the same
-wire (`POST <HERMESCLOAK_LOCAL_DECIDE_URL>/v1/systemone`, default `http://127.0.0.1:11600`) — the
-office's own Hebrew decision model (a LoRA on DictaLM-3.0-1.7B that scores option keys, served on the
-office GPU behind an SSH tunnel), so nothing leaves the office network. A primary that gives no answer
+wire (`POST <HERMESCLOAK_LOCAL_DECIDE_URL>/v1/systemone`, default `http://127.0.0.1:8012`) — a
+decision model you serve yourself (for example a small fine-tuned model that scores option keys),
+so nothing leaves your network. A primary that gives no answer
 falls back to the other backend when it is configured. `decide_shadow: true` also asks the other
 backend in the background and writes both answers (probabilities only) as `decide_shadow` events;
 `install/decide_shadow_report.py` turns those into per-question agreement and latency — a new model
