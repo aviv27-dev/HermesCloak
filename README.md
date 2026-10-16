@@ -68,7 +68,7 @@ if report.leftover:                               # fail-safe signal (see "Hones
 - **NER (optional `[ner]` extra):** Hebrew personal-name detection via DictaBERT-NER (lazy-loaded;
   runs as a separate shared service, not in-process). English NER is on the roadmap, not yet wired.
   Not required for the core.
-- **Israeli phones in any spelling:** `+972 (0)54-776-5611`, `972-54-7765611`, `054.776.5611`, `00972-3-…`
+- **Israeli phones in any spelling:** `+972 (0)52-000-0002`, `972-52-0000002`, `052.000.0002`, `00972-3-…`
   are normalized to one national number and validated (mobile/VoIP 9 digits, landline 8) before masking;
   dates, amounts and case numbers never match. A labelled ת"ז written with its leading zeros dropped
   (`ת.ז. 0000018`) is padded and check-digit-tested.
@@ -77,7 +77,7 @@ if report.leftover:                               # fail-safe signal (see "Hones
 - **Optional second opinion on the masked request** (`jev_check`): TypeSafe's Jev, a typed-decision
   model, is asked whether a private person's name / contact / identifier is still in clear in the text
   *as it leaves* (tokens, not values) — the gaps regexes and a client list cannot close. Off by default;
-  the same door serves the office's own locally hosted decision model (`decide_backend: local`), with
+  the same door serves a decision model you host yourself (`decide_backend: local`), with
   shadow mode and per-use calibration to earn the switch.
 - **Never-mask allowlist** (e.g. court/authority names) and an over-mask bias for *names* (a leaked
   identity is the catastrophic failure). Numeric detectors are precise to avoid shredding data dumps.
@@ -96,16 +96,16 @@ longer silently remove it. Everything that identifies a deployment (profile, nam
 lives under `$HERMES_HOME/cloak/` — never in this repo.
 
 ```bash
-hermes plugins install aviv27-dev/HermesCloak --enable    # hermes' own installer + package manager
+hermes plugins install aviv27-dev/HermesCloak --enable    # per agent: hermes -p <profile> plugins install …
 echo enforce > ~/.hermes/cloak/MODE                       # off | shadow | enforce — read every turn
 hermes gateway restart
-python install/apply_hooks.py --verify --hermes-root /path/to/hermes-agent   # from a clone of this repo
+hermes hermescloak verify                                 # installed, loadable, hooked into this hermes?
+hermes hermescloak test                                   # end-to-end proof against a local fake cloud
 ```
 
-Current hermes-agent runs from its **own managed Python runtime** (`$HERMES_HOME/installs/…`), so a
-`pip install` into some other venv is not seen by the running agent — install it with
-`hermes plugins install` as above; hermes' package manager then installs this repository's
-`pyproject.toml` into that runtime. (`--verify` checks exactly this.)
+**[docs/INSTALL.md](docs/INSTALL.md)** is the single install / test / removal guide. The plugin
+installs no Python packages into hermes' runtime (`python_runtime: external`): hermes' shared runtime
+environment is never rebuilt, and a `pip install` is never needed.
 
 - **[docs/INTEGRATION.md](docs/INTEGRATION.md)** — install, configure `$HERMES_HOME/cloak/`, what is
   intercepted (outbound middleware, inbound, streaming, auxiliary calls), verification, known gaps.

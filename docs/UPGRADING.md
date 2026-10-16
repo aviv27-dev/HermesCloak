@@ -6,8 +6,11 @@ hermes now runs from its own package-manager environment under `$HERMES_HOME/ins
 the venv it was installed into. An installation made with `pip install -e /path/to/HermesCloak`
 into hermes' venv **stops loading silently** after that update: `plugins.enabled` still lists
 `hermescloak`, but the runtime cannot import it, and older `--verify` versions still said OK.
-Reinstall with `hermes plugins install aviv27-dev/HermesCloak --enable` and confirm with the current
-`--verify` (it probes the managed runtime) and a fresh `plugin_active` + `enforce_send`.
+Reinstall with `hermes plugins install aviv27-dev/HermesCloak --enable` and confirm with
+`hermes hermescloak verify` / `hermes hermescloak test` and a fresh `plugin_active` + `enforce_send`.
+0.2.0's directory install let hermes' package manager put the package into the runtime shared by
+every agent. 0.2.1 declares `python_runtime: external` and installs nothing; to clear a 0.2.0
+leftover, see [INSTALL.md → Remove completely](INSTALL.md#remove-completely).
 
 ## Since HermesCloak 0.2 — plugin install (current hermes-agent)
 
@@ -17,8 +20,8 @@ internal points the plugin hooks. That never breaks hermes (every hook is guarde
 would drop — so after each update:
 
 ```bash
-python install/apply_hooks.py --verify --hermes-root /path/to/hermes-agent   # static check, exit 1 = act
-/path/to/hermes-venv/bin/python install/e2e_check.py --hermes-root /path/to/hermes-agent   # live proof
+hermes hermescloak verify      # static + install check, exit 1 = act
+hermes hermescloak test        # end-to-end proof (throwaway home, deleted afterwards)
 grep -E 'plugin_active|seam_missing' $HERMES_HOME/cloak/audit.log | tail -2  # after the gateway restart
 ```
 

@@ -8,7 +8,7 @@ new kind of exposure — but it IS a second vendor; it is off unless ``jev_check
 
 ``check(text, profile)`` → ``{"hits": {q: p}, "probs": {q: p}, "ms", "model", "backend"}`` or None when
 the check is off / unconfigured; ``{"error": reason}`` when it did not run (breaker, timeout, cap…) —
-the caller then behaves as before. Backend: Jev, or the office's own local decision model
+the caller then behaves as before. Backend: Jev, or a decision model you serve locally
 (profile ``decide_backend: local``), optionally with the other one in shadow (``decide_shadow``).
 """
 from __future__ import annotations
@@ -16,8 +16,8 @@ from __future__ import annotations
 from hermescloak import decide as _decide
 
 USE_CASE = "residual:request"
-# Level B as the office approved it for Jev: at most 600 characters of (masked) text per call. The
-# most recent part of the request is where a new leak would be. Raise it only for the local backend.
+# At most 600 characters of (masked) text per call by default (profile jev_max_chars). The most
+# recent part of the request is where a new leak would be. Raise it only for a local backend.
 MAX_CHARS = 600
 
 QUESTIONS = {

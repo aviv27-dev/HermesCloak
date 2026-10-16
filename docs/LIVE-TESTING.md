@@ -10,9 +10,8 @@ Rollback at any point: `echo off > $HERMES_HOME/cloak/MODE` (instant, no restart
 ## 0. Offline checks (no traffic)
 
 ```bash
-python install/apply_hooks.py --verify --hermes-root /path/to/hermes-agent      # all OK
-/path/to/hermes-venv/bin/python install/e2e_check.py --hermes-root /path/to/hermes-agent
-#   real AIAgent, fake cloud, OpenAI + Anthropic streaming with a tool loop → PROTECTED ✓
+hermes hermescloak verify      # all OK
+hermes hermescloak test        # real agent, fake cloud, streaming + tool loop → PROTECTED ✓
 ```
 
 ### Optional: sandbox against a real model (no deployment touched)
@@ -108,7 +107,7 @@ measurement. Then, on the agent: `jev_check: true` in `profile.yaml` (live, no r
 and expect `jev_residual` in the audit log with `probs` and `ms`; a dead key or service shows as
 `jev_unavailable` and the turn goes on unchecked. `jev_action: block` only after the measurement.
 
-**Switching to the office's own decision model.** Point `HERMESCLOAK_LOCAL_DECIDE_URL` at the tunnel
+**Switching to your own decision model.** Point `HERMESCLOAK_LOCAL_DECIDE_URL` at your server
 (`/v1/systemone`), keep `decide_backend: jev` and set `decide_shadow: true` for a week; then
 
 ```bash

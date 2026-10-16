@@ -302,7 +302,7 @@ def test_verify_ok_when_the_managed_runtime_imports_it(tmp_path, monkeypatch, ca
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     _fake_runtime(tmp_path, importable=True)
     assert m._check_runtime({}) is True
-    assert "[OK ] hermescloak importable by hermes' managed runtime" in capsys.readouterr().out
+    assert "[OK ] hermescloak loads in hermes' managed runtime" in capsys.readouterr().out
 
 
 def test_verify_flags_host_isolation(tmp_path, monkeypatch, capsys):
@@ -409,3 +409,56 @@ def test_failsafe_also_withholds_auxiliary_calls(tmp_path, monkeypatch):
     import asyncio
     asyncio.run(ac._relay_async_completion(None, {"messages": [{"role": "user", "content": "דנה לוי"}]}))
     assert len(seen) == 2 and all("דנה" not in json.dumps(k, ensure_ascii=False) for k in seen)
+
+
+def test_cli_command_is_registered_and_dispatches(monkeypatch):
+    from hermescloak.hermes_plugin import cli
+    got = {}
+
+    class C:
+        def register_cli_command(self, name, help, setup_fn, handler_fn=None, description=""):
+            got.update(name=name, setup=setup_fn, handler=handler_fn)
+    assert cli.register(C()) == "ok" and got["name"] == "hermescloak"
+    import argparse
+    p = argparse.ArgumentParser()
+    got["setup"](p)
+    calls = []
+    monkeypatch.setattr(cli, "_run", lambda script, *a: calls.append((script, a)) or 0)
+    monkeypatch.setattr(cli, "_hermes_root", lambda: "/h")
+    assert got["handler"](p.parse_args(["test"])) == 0 and got["handler"](p.parse_args(["verify", "--strict"])) == 0
+    assert calls == [("e2e_check.py", ("--provider", "openai", "--hermes-root", "/h")),
+                     ("apply_hooks.py", ("--verify", "--strict", "--hermes-root", "/h"))]
+    assert cli._plugin_root() is not None           # the scripts ship in the plugin directory
+
+
+def test_plugin_manifest_never_joins_the_shared_runtime():
+    """python_runtime: external — hermes' PM must not treat the repo's pyproject as a dependency member
+    (15.10.2026 it rebuilt the runtime shared by every agent with HermesCloak inside)."""
+    import os, yaml
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    assert yaml.safe_load(open(os.path.join(root, "plugin.yaml"), encoding="utf-8"))["python_runtime"] == "external"
+
+
+def test_wrapper_loads_its_own_copy_without_touching_sys_path():
+    import sys
+    before = list(sys.path)
+    mod = _root_plugin_module()
+    pkg = mod._load_package()
+    import os
+    assert os.path.dirname(pkg.__file__) == os.path.join(mod._HERE, "hermescloak")
+    assert sys.path == before
+
+
+def test_verify_reports_whether_the_shared_runtime_carries_a_copy(tmp_path, monkeypatch, capsys):
+    m = _verify_mod()
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    py = _fake_runtime(tmp_path, importable=True)
+    sp = py.parent.parent / "lib" / "python3.14" / "site-packages"
+    sp.mkdir(parents=True)
+    assert m._check_runtime({}) is True
+    assert "contains no hermescloak package" in capsys.readouterr().out
+    (sp / "hermescloak").mkdir()
+    (sp / "hermescloak-0.2.0.dist-info").mkdir()
+    m._check_runtime({})
+    out = capsys.readouterr().out
+    assert "[WARN] the SHARED runtime" in out and "hermes pm install" in out

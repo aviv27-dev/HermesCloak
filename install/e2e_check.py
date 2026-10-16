@@ -10,10 +10,11 @@ checks:
   * the model's own turns are replayed byte-identically (prompt-cache / thinking-signature safe);
   * the plugin loaded with every interception point + self-test OK, no restore errors.
 
-Uses a throwaway HERMES_HOME (MODE=enforce, plugin enabled) — your real home is never touched:
+Uses a throwaway HERMES_HOME (MODE=enforce, this checkout installed as its plugin) that is DELETED
+afterwards (HERMESCLOAK_E2E_KEEP=1 keeps it) — your real agents are never touched:
 
-  /path/to/hermes-venv/bin/python install/e2e_check.py --hermes-root /path/to/hermes-agent
-  ... --provider openai|anthropic|both   (default both; anthropic needs the `anthropic` package)
+  hermes hermescloak test                     # the normal way: runs this inside hermes' own runtime
+  /path/to/python install/e2e_check.py [--hermes-root /path/to/hermes-agent] [--provider openai|anthropic|both]
 
 Exit 0 = protected on this hermes version.
 """
@@ -21,6 +22,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 import threading
@@ -211,13 +213,75 @@ def _run(provider, port):
     }
 
 
+def _scratch_home() -> str:
+    """A throwaway HERMES_HOME. Placed under the real hermes root's ``profiles/`` when there is one:
+    hermes treats a home OUTSIDE its root as a root of its own and builds a full runtime environment and
+    cache inside it (~1–1.8 GB per run); a profile-shaped home borrows the root's environment instead."""
+    root = os.path.expanduser(os.environ.get("HERMESCLOAK_E2E_ROOT") or "~/.hermes")
+    if os.path.isfile(os.path.join(root, "config.yaml")):
+        base = os.path.join(root, "profiles")
+        os.makedirs(base, exist_ok=True)
+        return tempfile.mkdtemp(prefix="hermescloak-e2e-", dir=base)
+    return tempfile.mkdtemp(prefix="hermescloak-e2e-")
+
+
+_CHILD = "--_hermescloak-e2e-child"
+
+
 def main():
+    # the scratch HERMES_HOME can grow to ~1.8 GB (hermes builds a runtime env + cache inside it) — always
+    # remove it, unless HERMESCLOAK_E2E_KEEP=1 is set for debugging (15.10.2026: 14 leftover dirs = 25 GB).
+    # The run happens in a CHILD process and the parent deletes the home after the child has exited:
+    # hermes' background writers recreate files in the home during interpreter shutdown, after any
+    # in-process cleanup has run.
+    if len(sys.argv) > 2 and sys.argv[1] == _CHILD:
+        home = sys.argv[2]
+        del sys.argv[1:3]
+        return _main(home)
+    home = _scratch_home()
+    try:
+        import subprocess
+        return subprocess.call([sys.executable, os.path.abspath(__file__), _CHILD, home, *sys.argv[1:]])
+    finally:
+        if os.environ.get("HERMESCLOAK_E2E_KEEP") == "1":
+            print(f"kept: {home}")
+        else:
+            shutil.rmtree(home, ignore_errors=True)
+
+
+def _hermes_root(given):
+    """The hermes-agent source tree: --hermes-root, else the one this interpreter already imports
+    (hermes' own runtime, e.g. via `hermes hermescloak test`)."""
+    if given:
+        return os.path.abspath(given)
+    try:
+        import agent
+        return os.path.dirname(os.path.dirname(os.path.abspath(agent.__file__)))
+    except Exception:
+        return None
+
+
+def _main(home):
     ap = argparse.ArgumentParser()
-    ap.add_argument("--hermes-root", required=True)
+    ap.add_argument("--hermes-root", default=None,
+                    help="hermes-agent checkout (default: the one this python already imports)")
     ap.add_argument("--provider", choices=["openai", "anthropic", "both"], default="both")
     a = ap.parse_args()
-    home = tempfile.mkdtemp(prefix="hermescloak-e2e-")
+    a.hermes_root = _hermes_root(a.hermes_root)
+    if not a.hermes_root:
+        print("hermes-agent is not importable by this python — pass --hermes-root, or run "
+              "`hermes hermescloak test`")
+        return 2
     os.makedirs(os.path.join(home, "cloak"))
+    # install THIS checkout as the scratch home's directory plugin, the way `hermes plugins install` lays
+    # it out (manifest + entry + package), so the run tests exactly this code on every hermes layout
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    dest = os.path.join(home, "plugins", "hermescloak")
+    os.makedirs(dest)
+    for item in ("plugin.yaml", "__init__.py"):
+        shutil.copy2(os.path.join(repo, item), dest)
+    shutil.copytree(os.path.join(repo, "hermescloak"), os.path.join(dest, "hermescloak"),
+                    ignore=shutil.ignore_patterns("__pycache__"))
     with open(os.path.join(home, "cloak", "MODE"), "w") as f:
         f.write("enforce")
     with open(os.path.join(home, "cloak", "gazetteer.txt"), "w", encoding="utf-8") as f:
@@ -227,7 +291,8 @@ def main():
         f.write("plugins:\n  enabled: [hermescloak]\ntools:\n  tool_search:\n    enabled: off\n")
     os.environ["HERMES_HOME"] = home
     os.environ.setdefault("ANTHROPIC_API_KEY", "x")
-    sys.path.insert(0, os.path.abspath(a.hermes_root))
+    if a.hermes_root not in sys.path:
+        sys.path.insert(0, a.hermes_root)
     os.chdir(a.hermes_root)
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _Fake)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -266,7 +331,7 @@ def main():
         print(f"  [{'OK ' if v else 'FAIL'}] {k}")
     ok &= all(tail.values())
     srv.shutdown()
-    print("--- " + ("PROTECTED ✓" if ok else "NOT PROTECTED") + f" (scratch home: {home}) ---")
+    print("--- " + ("PROTECTED ✓" if ok else "NOT PROTECTED") + " ---")
     return 0 if ok else 1
 
 

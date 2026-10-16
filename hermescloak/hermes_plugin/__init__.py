@@ -253,11 +253,22 @@ def status() -> dict[str, str]:
     return dict(_STATUS)
 
 
+def _register_cli(ctx) -> None:
+    from hermescloak.hermes_plugin import cli
+    r = cli.register(ctx)
+    if r != "ok":
+        raise RuntimeError(r)
+
+
 def register(ctx) -> None:
     """hermes plugin entry point."""
     ctx.register_middleware("llm_request", llm_request_middleware)
     st = install_runtime_patches()
     st["outbound"] = "ok: llm_request middleware"
+    try:
+        _register_cli(ctx)            # `hermes hermescloak verify|test` — a convenience, not a coverage point
+    except Exception:
+        logger.debug("hermescloak: CLI command not registered", exc_info=True)
     for label, fn in (("backstop_tools", lambda: ctx.register_middleware("tool_request", tool_request_middleware)),
                       ("backstop_reply", lambda: ctx.register_hook("transform_llm_output", transform_llm_output_hook))):
         try:

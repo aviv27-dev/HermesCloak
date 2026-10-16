@@ -1,5 +1,5 @@
-"""Typed decisions from a System One model — Jev (TypeSafe via OpenRouter) or the office's own
-locally served Hebrew decision model — behind one door: ``decide(use_case, state, questions)``.
+"""Typed decisions from a System One model — Jev (TypeSafe via OpenRouter) or a decision model
+you serve yourself — behind one door: ``decide(use_case, state, questions)``.
 
 A System One model never writes text: it reads a state and answers typed questions (yes/no
 probability, pick-one with a probability per option, a score) in a few hundred ms. HermesCloak uses
@@ -8,9 +8,9 @@ it for second opinions on text that has ALREADY been masked.
 Backends (``HERMESCLOAK_DECIDE_BACKEND`` / profile ``decide_backend``):
   jev    OpenRouter ``POST /api/alpha/decisions``, key ``OPENROUTER_API_KEY`` (or ``HERMESCLOAK_JEV_KEY``).
          A second vendor sees the masked text. ~0.3–0.6 s.
-  local  a server speaking the same shape at ``HERMESCLOAK_LOCAL_DECIDE_URL`` + ``/v1/systemone``
-         (default http://127.0.0.1:11600 — the office model behind an SSH tunnel). Nothing leaves
-         the office network. Choice questions limited to 2–26 options there.
+  local  a server you run that speaks the same shape at ``HERMESCLOAK_LOCAL_DECIDE_URL`` +
+         ``/v1/systemone`` (default http://127.0.0.1:8012). Nothing leaves your network. Choice
+         questions limited to 2–26 options there.
   A primary that gives no answer falls back to the other backend when ``fallback`` is on.
 
 Guarantees — the call never hurts the agent:
@@ -39,8 +39,7 @@ Questions: ``{name: {"type": "noul"|"choice"|"score", "instructions": str, "crit
 Thresholds compare against ``probabilities[choice]`` (``choice()`` below), never against Jev's
 ``confidence``: that field is a separate margin measure and reads lower (0.34 for a 0.56 choice).
 
-Design after AGLO-OS decide.js and AGLO-RAG jev.py / train/decide_model.py (the office's own
-modules, 10.2026).
+Design after an earlier in-house decision module (10.2026).
 """
 from __future__ import annotations
 
@@ -55,7 +54,7 @@ from datetime import date
 
 JEV_URL = "https://openrouter.ai/api/alpha/decisions"
 JEV_MODEL = "~typesafe/jev-latest"
-LOCAL_URL = "http://127.0.0.1:11600"
+LOCAL_URL = "http://127.0.0.1:8012"
 LOCAL_MODEL = "rag-hebrew-decide"
 LOCAL_MAX_CHOICE = 26
 TYPES = ("choice", "noul", "score")
@@ -219,8 +218,8 @@ class Decider:
         return self._env.get("OPENROUTER_API_KEY") or self._env.get("HERMESCLOAK_JEV_KEY") or ""
 
     def local_url(self) -> str:
-        """Set explicitly (env / ctor), or the default tunnel address only when local IS the chosen
-        backend — so a Jev-only deployment never knocks on 127.0.0.1:11600 as a fallback."""
+        """Set explicitly (env / ctor), or the local default only when local IS the chosen
+        backend — so a Jev-only deployment never knocks on the local default as a fallback."""
         u = self._env.get("HERMESCLOAK_LOCAL_DECIDE_URL") or self._local_url
         if not u and self._raw_backend() == "local":
             u = LOCAL_URL

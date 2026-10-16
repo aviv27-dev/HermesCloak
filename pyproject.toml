@@ -1,6 +1,6 @@
 [project]
 name = "hermescloak"
-version = "0.2.0"
+version = "0.2.1"
 description = "Reversible PII pseudonymization for Hermes LLM agents (contained placeholder lifecycle)."
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }

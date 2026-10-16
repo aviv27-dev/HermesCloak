@@ -1,8 +1,8 @@
 """Israeli phone numbers: one canonical form for a dozen spellings.
 
-WhatsApp hands over E.164 (+972547765611); CRM rows, scanned protocols and letters write the same
-number many ways: 054-7765611, 054 776 5611, 0547765611, 054.776.5611, 972-54-7765611,
-+972 (0)54 776 5611, 00972547765611. A spelling-based regex misses most of them, so detection
+WhatsApp hands over E.164 (+972520000002); CRM rows, scanned protocols and letters write the same
+number many ways: 052-0000002, 052 000 0002, 0520000002, 052.000.0002, 972-52-0000002,
++972 (0)52 000 0002, 00972520000002. A spelling-based regex misses most of them, so detection
 works from the national significant number (NSN: the digits after the leading 0 / after 972):
 mobile and VoIP = 9 digits (5X / 7X + 7), landline = 8 digits (area digit + 7).
 
@@ -19,7 +19,7 @@ _NSN = re.compile(r"^[2-9]\d{7,8}$")
 
 
 def normalize(raw: str) -> str | None:
-    """The NSN ("547765611") of an Israeli phone number in any common spelling, else None."""
+    """The NSN ("520000002") of an Israeli phone number in any common spelling, else None."""
     d = re.sub(r"\D", "", raw or "")
     if not d:
         return None

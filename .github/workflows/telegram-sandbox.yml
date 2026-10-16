@@ -5,7 +5,7 @@ name: Telegram sandbox agent
 # SYNTHETIC DATA ONLY: the runner is GitHub's machine (the vault lives there for the run).
 #
 # Start: add the `live-telegram` label to the PR (remove + re-add to start another window).
-# Repository secrets:   TELEGRAM_AGLOGITCLOAK_BOT (bot token from @BotFather — a DEDICATED bot,
+# Repository secrets:   TELEGRAM_SANDBOX_BOT_TOKEN (bot token from @BotFather — a DEDICATED bot,
 #                       never a production agent's bot), TELEGRAM_ALLOWED_USERS or TELEGRAM_USER_ID (your numeric
 #                       Telegram id, from @userinfobot; comma-separated for several),
 #                       OLLAMA_API_KEY or OLLAMA_TEST_KEY.
@@ -27,7 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 330
     env:
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_AGLOGITCLOAK_BOT }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_SANDBOX_BOT_TOKEN }}
       TELEGRAM_ALLOWED_USERS: ${{ secrets.TELEGRAM_ALLOWED_USERS || secrets.TELEGRAM_USER_ID }}
       OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY || secrets.OLLAMA_TEST_KEY }}
       MODEL: ${{ vars.HC_LIVE_MODEL || 'gpt-oss:120b' }}
@@ -40,7 +40,7 @@ jobs:
       - name: Check secrets
         run: |
           missing=""
-          [ -n "$TELEGRAM_BOT_TOKEN" ]     || missing="$missing TELEGRAM_AGLOGITCLOAK_BOT"
+          [ -n "$TELEGRAM_BOT_TOKEN" ]     || missing="$missing TELEGRAM_SANDBOX_BOT_TOKEN"
           [ -n "$TELEGRAM_ALLOWED_USERS" ] || missing="$missing TELEGRAM_ALLOWED_USERS/TELEGRAM_USER_ID"
           [ -n "$OLLAMA_API_KEY" ]         || missing="$missing OLLAMA_API_KEY/OLLAMA_TEST_KEY"
           if [ -n "$missing" ]; then echo "::error::missing repository secrets:$missing"; exit 1; fi

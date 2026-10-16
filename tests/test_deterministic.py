@@ -90,7 +90,7 @@ def test_gush_helka_type_has_no_underscore():
     assert sp and "_" not in sp[0].entity_type
 
 
-# ---- spellings and exemptions learned from the office's own PII module (pii.js / phone-identify.js)
+# ---- phone spellings, labelled-ID padding and institutional mail domains
 
 def _types(text, **kw):
     from hermescloak.recognizers.deterministic import DeterministicRecognizer
@@ -98,7 +98,7 @@ def _types(text, **kw):
 
 
 def test_phone_in_every_common_spelling():
-    text = "+972 (0)54-776-5611 / 972-54-7765611 / 0547765611 / 054.776.5611 / 00972-3-1234567 / 08 123 4567"
+    text = "+972 (0)52-000-0002 / 972-52-0000002 / 0520000002 / 052.000.0002 / 00972-3-1234567 / 08 123 4567"
     assert [t for t, _ in _types(text)] == ["טלפון"] * 6
 
 

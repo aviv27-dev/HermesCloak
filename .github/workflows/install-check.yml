@@ -1,0 +1,25 @@
+name: Stock install check
+# The ordinary-user cycle on the CURRENT hermes-agent: install from this commit with
+# `hermes plugins install`, prove the shared runtime is untouched, verify, test, remove, nothing left.
+# Runs on pushes to main, weekly (hermes moves fast), on demand, and on a PR labelled `install-test`.
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+  pull_request:
+    types: [labeled, synchronize]
+
+jobs:
+  stock-install:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'install-test')
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Install a stock hermes-agent (throwaway venv)
+        run: WORK="$RUNNER_TEMP/sandbox" SANDBOX_INSTALL_ONLY=1 bash install/live_sandbox.sh
+      - name: Install → shared runtime untouched → verify → test → remove → nothing left
+        run: HERMES="$RUNNER_TEMP/sandbox/venv/bin/hermes" bash install/stock_install_check.sh

@@ -29,7 +29,7 @@ def test_sql_entity_source_yields_rows_and_default_type():
     assert all(name for name, _ in rows)   # empty name skipped
     assert len(rows) == 2
 
-def test_aglo_os_source_feeds_gazetteer():
+def test_db_source_feeds_gazetteer():
     db = _make_db()
     src = DbGazetteerSource(lambda: _Conn(db), "SELECT name, kind FROM parties")
     rec = GazetteerRecognizer(src)
