@@ -5,3 +5,6 @@ __pycache__/
 build/
 dist/
 .venv/
+
+# cached web fonts for docs/brand/src/render.mjs
+docs/brand/src/.fonts/
