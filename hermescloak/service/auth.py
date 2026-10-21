@@ -37,10 +37,17 @@ def ensure_token(path: str | None = None) -> str:
     from hermescloak.fsutil import private_dir
     private_dir(os.path.dirname(path))
     tok = secrets.token_urlsafe(32)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(tok + "\n")
-    return tok
+    try:
+        os.link(tmp, path)                 # atomic, and never replaces a token another start wrote
+    except FileExistsError:
+        pass
+    finally:
+        os.remove(tmp)
+    return read_token(path) or tok
 
 
 def proof(token: str, nonce: str) -> str:

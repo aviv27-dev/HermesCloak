@@ -116,6 +116,8 @@ def _withheld(request: dict, api_mode: str) -> dict:
         if k in out:
             out[k] = _NOTICE if isinstance(out[k], str) else [{"text": _NOTICE}] if api_mode == "bedrock_converse" \
                 else [{"type": "text", "text": _NOTICE}]
+    if "prompt" in out:                      # completions-style requests
+        out["prompt"] = _NOTICE
     for k in ("tools", "tool_choice"):
         out.pop(k, None)
     return out

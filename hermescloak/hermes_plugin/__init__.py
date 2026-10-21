@@ -21,7 +21,9 @@ target still exists and the result is written to ``$HERMES_HOME/cloak/audit.log`
 ``plugin_active`` (with any ``missing`` targets) so an incompatible hermes update is loud.
 ``python install/apply_hooks.py --verify --hermes-root <checkout>`` checks the same targets
 statically. Every wrap is MODE-scoped. If the self-test fails or the auxiliary funnel cannot be
-wrapped, requests are withheld in enforce (unless the profile says ``fail_mode: open``).
+wrapped, main-turn requests are withheld in enforce (unless the profile says ``fail_mode: open``).
+Auxiliary calls do not pass the request middleware: when their funnel is gone they cannot be
+covered at all, and withholding the main turn is what stops the conversation from going on.
 
 Install: ``hermes plugins install aviv27-dev/HermesCloak --enable`` (the repository root is a
          directory plugin; hermes' package manager installs this package into its managed
@@ -35,6 +37,7 @@ import inspect
 import json
 import logging
 import threading
+import uuid
 from types import SimpleNamespace
 
 logger = logging.getLogger("hermescloak")
@@ -201,9 +204,11 @@ def _patch_streaming() -> str:
 def _aux_session_id() -> str:
     try:
         from agent.auxiliary_hooks import _parent_turn_identity
-        return _parent_turn_identity().get("session_id") or "aux"
+        sid = _parent_turn_identity().get("session_id")
     except Exception:
-        return "aux"
+        sid = ""
+    # no parent turn (cron, idle gateway work): a scope of its own, never one shared by all such calls
+    return sid or f"aux-{uuid.uuid4().hex}"
 
 
 def _patch_auxiliary() -> str:

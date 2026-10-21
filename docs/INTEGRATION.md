@@ -105,7 +105,7 @@ silently reducing coverage.
 | broken `profile.yaml` / unreadable `gazetteer.txt` | last good version kept (`config_error`) |
 | NER service hung or down | circuit breaker: one timeout, then NER is skipped for 30 s (`ner_down` / `ner_up`) instead of a timeout per message |
 | internal filter error (incl. hostile input: broken Unicode, absurd nesting) | `fail_mode: closed` (default) → text withheld + `blocked_send`; `fail_mode: open` → original sent + `unfiltered_sent` (also `blocked_send` with `jev_action: block` on a Jev hit) |
-| self-test fails, or the auxiliary funnel can't be wrapped | in `enforce` every request is withheld (`blocked_send`, reason `plugin_degraded`) until hermes and the plugin match again; `fail_mode: open` keeps sending with reduced coverage |
+| self-test fails, or the auxiliary funnel can't be wrapped | in `enforce` every main-turn request is withheld (`blocked_send`, reason `plugin_degraded`) until hermes and the plugin match again, so the conversation stops; auxiliary calls whose funnel is gone cannot be intercepted at all. `fail_mode: open` keeps sending with reduced coverage |
 | hermes update moves an interception point | `seam_missing` at load + warning; two official-API backstops still restore tool arguments (`tool_request` middleware) and the final reply (`transform_llm_output`) |
 | concurrent sessions in one process | the vault is thread-safe (one token per value, ever) |
 | a token from another session (guessed, or planted in a web page / tool result) | not restored: a reply or tool call gets back only the tokens **its own session's** tokenizer substituted (`foreign_token`) — see below |
@@ -141,7 +141,10 @@ mail/CRM scripts the agent writes). It restores **only for hosts listed** in
 `$HERMES_HOME/cloak/egress_hosts`, one per line (`graph.microsoft.com`, or `example.com` for it and
 its subdomains). For any other host the tokens go out as tokens (`egress_blocked`): otherwise a
 prompt-injected script could post `⟦לקוח_1⟧` to an attacker and receive the real value. Without
-the file nothing is restored.
+the file nothing is restored. A URL with userinfo (`user@host`) or a backslash is never an allowed
+host. **Limit:** the script is a separate process that cannot know the agent's session, so for a
+listed host it restores any token of the agent's vault, not only the current session's: list only
+hosts you trust with all of the agent's data, and prefer tools inside hermes (scoped per session).
 
 ## 5. Verify it's live and healthy
 
@@ -170,6 +173,7 @@ fail-safe alarm — investigate).
 | `leftover_token` | how many tokens could not be restored, and of which types (never the text) |
 | `foreign_token` | a reply or tool call carried a token its session was never shown — a guess or an injection attempt: **investigate** |
 | `restore_unscoped` | a restore ran with no session and no turn context, so nothing was restored |
+| `ner_auth_failed` | NER is configured but the service could not prove the shared token (`no-token`, `old-service` = restart it after upgrading, `bad-proof`): **NER is off** until fixed |
 | `egress_blocked` | the HTTP egress net saw tokens in a request to a host not in `egress_hosts` and left them as tokens |
 | `leaked_original` | the model wrote a value we had masked — it saw it via some unmasked path: **investigate** |
 | `new_pii` | PII-shaped values the model introduced itself (counts per type) |

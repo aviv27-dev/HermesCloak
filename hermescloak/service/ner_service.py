@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, urlsplit
 from hermescloak.service import auth
 
 MAX_BODY = 2_000_000
-_LOCAL_HOSTS = ("127.0.0.1", "localhost", "[::1]", "::1")
+_LOCAL_HOSTS = ("127.0.0.1", "localhost")
 
 
 def default_factory():
@@ -125,7 +125,7 @@ def make_handler(holder: NerEngineHolder, token: str):
 def serve(host: str = "127.0.0.1", port: int = 8011, factory=default_factory, token: str | None = None):
     """Build (httpd, holder). Caller runs httpd.serve_forever(). ``token``: the shared secret
     (default: read or create the token file, see service/auth.py)."""
-    if host not in ("127.0.0.1", "::1", "localhost"):
+    if host not in ("127.0.0.1", "localhost"):
         raise ValueError("the NER service receives unmasked text: bind it to 127.0.0.1 only")
     holder = NerEngineHolder(factory)
     httpd = ThreadingHTTPServer((host, port), make_handler(holder, token or auth.ensure_token()))

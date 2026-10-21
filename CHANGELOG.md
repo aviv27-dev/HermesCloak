@@ -18,11 +18,14 @@ dependencies. **Two defaults changed** (see "Upgrading" below).
 - **Hostile input.** A lone UTF-16 surrogate (a truncated emoji in a web page) and tool arguments
   nested hundreds of levels deep made the filter fail open. Both now mask normally.
 - **Degraded plugin.** If the self-test fails or the auxiliary funnel (titles, compression) can't be
-  wrapped, `enforce` withholds requests (`plugin_degraded`).
+  wrapped, `enforce` withholds main-turn requests (`plugin_degraded`), so the conversation stops.
+- **Auxiliary calls with no parent turn** (cron, idle gateway work) each get a scope of their own.
 - **MODE file.** A UTF-16 (PowerShell) or BOM-prefixed `MODE`, an unreadable one, or a typo used to
   mean `off`. Now it reads as intended, or as `enforce` when unclear.
 - **HTTP egress net.** It restored tokens for any host. Now it restores only for the hosts listed in
-  `cloak/egress_hosts`, and never from cleared vaults.
+  `cloak/egress_hosts`, and never from cleared vaults. URLs with userinfo or a backslash never count
+  as a listed host, and the body sent to an unlisted host is never touched. It still restores any
+  token of the agent's vault for a listed host, because the script cannot know the session.
 - **Audit log.** It could contain real values: exception text, and the text of mangled tokens. Now it
   records types and counts only. It is created 0600, and the cloak dir and vault dir are 0700. The
   vault journal and lock files are 0600.
@@ -43,7 +46,8 @@ dependencies. **Two defaults changed** (see "Upgrading" below).
 - **Memory.** The engine's content cache is capped by size, and the shadow-mode vault by entries.
 - **`.pth` autoloader.** A `HERMES_HOME` path with quotes or backslashes could inject code, or break
   on Windows. It is now quoted once.
-- **CI.**
+- **CI.** (Secrets per step narrow the exposure; a step can still influence later steps of the same
+  job, so a full boundary would need separate jobs.)
   - Every action is pinned to a commit SHA.
   - Secrets are set only on the steps that use them; install steps that run third-party code get none.
   - `pipefail` is on, so a leak scan can fail the job.
@@ -58,6 +62,8 @@ dependencies. **Two defaults changed** (see "Upgrading" below).
 - To keep the old behaviour on a filter error, set `fail_mode: open` in `cloak/profile.yaml`.
 - If you use the HTTP egress net (`install/egress_autoload.py`), list your mail and CRM API hosts in
   `cloak/egress_hosts`.
+- Restart the NER service after upgrading: an old service has no `/hello`, so NER stays off
+  (`ner_auth_failed`, `old-service`) until it is restarted.
 - If the NER service runs as a different user from the agents, point `HERMESCLOAK_NER_TOKEN_FILE`
   at a token file both can read.
 

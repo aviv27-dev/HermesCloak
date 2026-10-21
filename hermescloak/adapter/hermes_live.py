@@ -192,7 +192,8 @@ def _build_engine(session_id: str = "default") -> Engine:
         from hermescloak.adapter.ner_client import NerServiceRecognizer
         extra.append(NerServiceRecognizer(
             url, control_file=str(d / "ner.ctl"),
-            on_state_change=lambda up: _audit("ner_up" if up else "ner_down", url and "{}")))
+            on_state_change=lambda up: _audit("ner_up" if up else "ner_down", url and "{}"),
+            on_auth_failed=lambda why: _audit("ner_auth_failed", json.dumps({"why": why}), every=300)))
     return Engine(profile, entity_source=source, extra_recognizers=extra or None,
                   vault=_agent_vault(profile))
 
@@ -410,7 +411,7 @@ def withheld(request: dict) -> dict:
 def _withheld_minimal(request: dict) -> dict:
     """Last resort when even the redacting walk failed: drop EVERY text-bearing key."""
     from hermescloak.adapter.payload import REQUEST_TEXT_KEYS
-    out = {k: v for k, v in request.items() if k not in REQUEST_TEXT_KEYS}
+    out = {k: v for k, v in request.items() if k not in REQUEST_TEXT_KEYS}   # incl. "prompt"
     if "input" in request or "instructions" in request:
         out["input"] = [{"role": "user", "content": _REDACTED}]
     elif "system" in request:
@@ -478,6 +479,7 @@ def cloak_sanitize_request(request: dict, session_id=None, api_mode: str = ""):
         return request
     from hermescloak.adapter import payload as _p
     from hermescloak.restorer import leftover_tokens
+    _SHOWN.set(frozenset())          # a reused thread never inherits the previous turn's scope
     try:
         eng = _engine_for_session(session_id)
         if m == "shadow":

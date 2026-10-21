@@ -90,3 +90,8 @@ def test_no_turn_context_restores_nothing(tmp_path, monkeypatch):
     _in_new_turn(_session_a_has_a_client)
     out = _in_new_turn(live.cloak_restore_normalized, _FakeMsg("⟦לקוח_1⟧"))
     assert out.content == "⟦לקוח_1⟧"
+
+
+def test_turnless_auxiliary_calls_do_not_share_a_scope(monkeypatch):
+    import hermescloak.hermes_plugin as plugin
+    assert plugin._aux_session_id() != plugin._aux_session_id()      # one scope per call

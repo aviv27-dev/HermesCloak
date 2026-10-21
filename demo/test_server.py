@@ -48,8 +48,10 @@ _LOCAL_HOSTS = ("127.0.0.1", "localhost", "[::1]")
 
 
 def _new_session() -> str:
-    sid = secrets.token_urlsafe(18)
+    sid = secrets.token_hex(18)             # hex: never contains the "-r" sub-session separator
     with _lock:
+        if len(_issued) > 10_000:
+            _issued.clear()
         _issued.add(sid)
     return sid
 

@@ -11,6 +11,7 @@ import os
 import secrets
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -28,9 +29,11 @@ class NerServiceRecognizer:
     # After a failure NER is skipped for `cooldown` seconds, then one probe is let through.
     def __init__(self, base_url: str = "http://127.0.0.1:8011",
                  timeout: float = 5.0, control_file: str | None = None,
-                 cooldown: float = 30.0, on_state_change=None, token: str | None = None) -> None:
+                 cooldown: float = 30.0, on_state_change=None, token: str | None = None,
+                 on_auth_failed=None) -> None:
         self._url = base_url.rstrip("/")
         self._token = token
+        self._on_auth_failed = on_auth_failed
         self._timeout = timeout
         self._control_file = control_file  # optional live on/off without restart
         self._cooldown = cooldown
@@ -66,14 +69,17 @@ class NerServiceRecognizer:
         try:
             token = self._token or auth.read_token()
             if not token:
-                raise PermissionError("no NER token (see hermescloak/service/auth.py)")
+                raise PermissionError("no-token")
             # the service must prove it knows the token BEFORE it gets any text: a process squatting
             # on the port while the service is down learns nothing
             nonce = secrets.token_hex(16)
-            with _OPENER.open(self._url + "/hello?nonce=" + nonce, timeout=self._timeout) as resp:
-                got = json.loads(resp.read().decode("utf-8")).get("proof", "")
+            try:
+                with _OPENER.open(self._url + "/hello?nonce=" + nonce, timeout=self._timeout) as resp:
+                    got = json.loads(resp.read().decode("utf-8")).get("proof", "")
+            except urllib.error.HTTPError as e:      # 404: a pre-0.3 service that has no /hello
+                raise PermissionError("old-service" if e.code == 404 else f"http-{e.code}") from e
             if not auth.same(got, auth.proof(token, nonce)):
-                raise PermissionError("NER service failed authentication")
+                raise PermissionError("bad-proof")
             req = urllib.request.Request(
                 self._url + "/recognize",
                 data=json.dumps({"text": text}).encode("utf-8"),
@@ -85,7 +91,12 @@ class NerServiceRecognizer:
                      for s in data.get("spans", [])]
             self._set_up(True)
             return spans
-        except Exception:
+        except Exception as exc:
+            if isinstance(exc, PermissionError) and self._on_auth_failed is not None:
+                try:                              # not "down": NER is OFF until this is fixed — say so
+                    self._on_auth_failed(str(exc))
+                except Exception:
+                    pass
             with self._lock:
                 self._open_until = time.monotonic() + self._cooldown
             self._set_up(False)
