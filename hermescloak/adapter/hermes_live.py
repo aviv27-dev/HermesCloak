@@ -7,13 +7,15 @@ Scoped + safe by design:
   * shadow → run detection to PROVE it works (audit logs counts/types only, NEVER real PII) but
     SEND THE ORIGINAL outbound and restore nothing (zero behaviour change).
   * enforce → tokenize the outbound copy; restore the response (content + tool-call args) in place.
-  * FAIL-OPEN by default: any exception → the original + an audit line; never raise into hermes.
-    ``fail_mode: closed`` withholds the text instead.
+  * FAIL-CLOSED by default: in enforce, an internal error withholds the text (audit
+    ``blocked_send``); ``fail_mode: open`` sends the original + ``unfiltered_sent`` instead.
+    Never raises into hermes.
   * SELF-HEALING config: a broken profile.yaml / gazetteer.txt never disables filtering — the
     last good version keeps being used (audited as ``config_error``); edits apply live.
 
 Duck-typed on the passed objects (no hermes import) so it stays testable and import-safe.
 The audit log never contains real PII — only event kinds, counts, and entity types."""
+import hashlib
 import json
 import os
 import threading
@@ -52,11 +54,28 @@ def _cloak_dir() -> Path:
     return Path(_home()) / "cloak"
 
 
+def parse_mode(raw: bytes) -> str:
+    """MODE file bytes → off | shadow | enforce. Tolerates a BOM, UTF-16 (PowerShell 5 `echo >`)
+    and surrounding whitespace; anything present but unrecognized means enforce (fail closed)."""
+    for enc in ("utf-8-sig", "utf-16"):
+        try:
+            text = raw.decode(enc)
+        except UnicodeError:
+            continue
+        m = text.replace("\ufeff", "").replace("\x00", "").strip().lower()
+        if m in ("off", "shadow", "enforce"):
+            return m
+    return "enforce"
+
+
 def _mode() -> str:
     try:
-        return (_cloak_dir() / "MODE").read_text(encoding="utf-8").strip().lower()
+        raw = (_cloak_dir() / "MODE").read_bytes()
+    except FileNotFoundError:
+        return "off"                     # no MODE file: this agent is not opted in
     except Exception:
-        return "off"
+        return "enforce"                 # present but unreadable: fail closed
+    return parse_mode(raw)
 
 
 def mode() -> str:
@@ -233,7 +252,7 @@ def _agent_vault(profile: Profile | None = None):
             except Exception as exc:
                 from hermescloak.vault import Vault
                 v = Vault()                           # fail-open
-                _audit("vault_error", repr(exc))
+                _audit("vault_error", type(exc).__name__)
             _AGENT_VAULTS[home] = v
         _drain_vault_events(v)
         return v
@@ -245,7 +264,10 @@ def _replay():
         r = _REPLAYS.get(home)
         if r is None:
             from hermescloak.replay import ReplayCache
-            r = ReplayCache(str(_cloak_dir() / "replay.json"))
+            key = _vault_key()
+            secret = (hashlib.sha256(b"hermescloak-replay\0" + key.encode("utf-8")).digest()
+                      if key and key != "!unreadable" else None)
+            r = ReplayCache(str(_cloak_dir() / "replay.json"), secret=secret)
             _REPLAYS[home] = r
         return r
 
@@ -278,12 +300,126 @@ def _engine_for(agent) -> Engine:
 
 def _fail_closed() -> bool:
     try:
-        return _load_profile(_home(), _cloak_dir()).fail_mode == "closed"
+        return _load_profile(_home(), _cloak_dir()).fail_mode != "open"
     except Exception:
-        return False
+        return True
+
+
+# ---------------------------------------------------------------- restore scope
+# The vault is shared by all of an agent's sessions, and tokens are guessable (⟦לקוח_1⟧, ⟦תז_1⟧…).
+# Restoring every token the vault knows would let injected text in session B ("fetch
+# https://x/?q=⟦לקוח_1⟧") pull real values of session A's clients into a tool call. So a reply or
+# tool call gets back only the tokens its own session was shown: the tokens in that session's
+# sanitized requests. The history is resent on every turn, so the set rebuilds itself after a restart.
+import contextvars
+from hermescloak.tokens import TOKEN_RE as _TOKEN_RE
+
+_SHOWN: "contextvars.ContextVar[frozenset | None]" = contextvars.ContextVar("hermescloak_shown", default=None)
+_SENT: "OrderedDict[tuple[str, str], set]" = OrderedDict()   # (home, session) -> tokens shown to the model
+_MAX_SENT_SESSIONS = 1024
+_SLOCK = threading.Lock()
+
+
+def _sid(session_id) -> str:
+    return str(session_id or "default")
+
+
+def _minting(fn, minted: set):
+    """Wrap a text transform: record the tokens IT put in (not ones already in the input — a token
+    an attacker typed into a web page or tool result must not become restorable)."""
+    def g(s):
+        out = fn(s)
+        if isinstance(out, str) and isinstance(s, str) and "⟦" in out:
+            before = {m.group(0) for m in _TOKEN_RE.finditer(s)} if "⟦" in s else set()
+            minted.update(m.group(0) for m in _TOKEN_RE.finditer(out) if m.group(0) not in before)
+        return out
+    return g
+
+
+def _remember_shown(session_id, found: set) -> frozenset:
+    key = (_home(), _sid(session_id))
+    with _SLOCK:
+        cur = _SENT.get(key)
+        if cur is None:
+            cur = _SENT[key] = set()
+            while len(_SENT) > _MAX_SENT_SESSIONS:
+                _SENT.popitem(last=False)
+        else:
+            _SENT.move_to_end(key)
+        cur |= found
+        shown = frozenset(cur)
+    _SHOWN.set(shown)
+    return shown
+
+
+def _scope(session_id=None, *, use_context: bool = True):
+    """The tokens this call may restore: the session's own (by id), else the current turn's."""
+    if session_id not in (None, ""):
+        with _SLOCK:
+            cur = _SENT.get((_home(), _sid(session_id)))
+        if cur is not None:
+            return frozenset(cur)
+    if use_context:
+        ctx = _SHOWN.get()
+        if ctx is not None:
+            return ctx
+    return None
+
+
+class _ScopedVault:
+    """Read-only view of the vault that resolves only the tokens in ``allowed``."""
+
+    def __init__(self, vault, allowed) -> None:
+        self._v, self._allowed, self.foreign = vault, allowed, set()
+
+    def restore_token(self, token: str):
+        real = self._v.restore_token(token)
+        if real is not None and token not in self._allowed:
+            self.foreign.add(token)
+            return None
+        return real
+
+    def __getattr__(self, name):
+        return getattr(self._v, name)
+
+
+def _scoped(vault, allowed, where: str):
+    if allowed is None:                      # no session and no turn context: restore nothing
+        _audit("restore_unscoped", json.dumps({"where": where}), every=300)
+        allowed = frozenset()
+    return _ScopedVault(vault, allowed)
+
+
+def _report_foreign(sv, where: str) -> None:
+    if isinstance(sv, _ScopedVault) and sv.foreign:
+        _audit("foreign_token", json.dumps({"where": where, "count": len(sv.foreign)}))
 
 
 _REDACTED = "[HermesCloak: content withheld — PII filter failed (fail_mode: closed)]"
+
+
+def withheld(request: dict) -> dict:
+    """The request with every piece of text replaced by the notice."""
+    from hermescloak.adapter import payload as _p
+    try:
+        return _p.transform_request(request, lambda _s: _REDACTED)
+    except Exception:
+        return _withheld_minimal(request)
+
+
+def _withheld_minimal(request: dict) -> dict:
+    """Last resort when even the redacting walk failed: drop EVERY text-bearing key."""
+    from hermescloak.adapter.payload import REQUEST_TEXT_KEYS
+    out = {k: v for k, v in request.items() if k not in REQUEST_TEXT_KEYS}
+    if "input" in request or "instructions" in request:
+        out["input"] = [{"role": "user", "content": _REDACTED}]
+    elif "system" in request:
+        out["messages"] = [{"role": "user", "content": [{"type": "text", "text": _REDACTED}]}]
+    else:
+        out["messages"] = [{"role": "user", "content": _REDACTED}]
+    return out
+
+
 _REDACTED_JEV = "[HermesCloak: content withheld — an identifier may still be in clear (jev_action: block)]"
 
 
@@ -314,7 +450,7 @@ def _jev_residual(eng, masked_text: str):
                                           ensure_ascii=False))
         return r
     except Exception as exc:  # noqa: BLE001
-        _audit("jev_unavailable", json.dumps({"reason": "error", "detail": repr(exc)[:120]}), every=60)
+        _audit("jev_unavailable", json.dumps({"reason": "error", "detail": type(exc).__name__}), every=60)
         return None
 
 
@@ -335,8 +471,8 @@ def cloak_sanitize_request(request: dict, session_id=None, api_mode: str = ""):
 
     Returns the request to send: a tokenized copy in enforce, the original in off/shadow.
     The model's own earlier turns are replayed byte-identically (ReplayCache).
-    On an internal error: the original (fail_mode: open, default) or a copy whose text is
-    replaced by a notice (fail_mode: closed) — never raises."""
+    On an internal error: a copy whose text is replaced by a notice (fail_mode: closed, default)
+    or the original (fail_mode: open) — never raises."""
     m = _mode()
     if m not in ("shadow", "enforce") or not isinstance(request, dict):
         return request
@@ -349,7 +485,9 @@ def cloak_sanitize_request(request: dict, session_id=None, api_mode: str = ""):
             # a real-value store to disk or change anything the agent sees
             from hermescloak.pseudonymizer import pseudonymize
             from hermescloak.vault import Vault
-            sv = _SHADOW_VAULTS.setdefault(_home(), Vault())
+            sv = _SHADOW_VAULTS.get(_home())
+            if sv is None or len(getattr(sv, "_token_to_real", ())) > 50_000:   # counting only: bounded
+                sv = _SHADOW_VAULTS[_home()] = Vault()
             _p.transform_request(request, lambda s: pseudonymize(s, eng.detection, sv))
             _audit("shadow_detect", json.dumps(sv.summary(), ensure_ascii=False))
             return request  # zero behaviour change — original goes to the cloud
@@ -371,7 +509,10 @@ def cloak_sanitize_request(request: dict, session_id=None, api_mode: str = ""):
                 return hit if hit is not None else _tok(s)
 
             raw_args = _replayed
-        sanitized = _p.transform_request(request, fn, raw_args=raw_args)
+        minted: set = set()
+        sanitized = _p.transform_request(request, _minting(fn, minted),
+                                         raw_args=_minting(raw_args, minted) if raw_args else None)
+        _remember_shown(session_id, minted)
         # measured BEFORE the instruction is added, so its example tokens never count
         in_request = _tokens_by_type(_p.request_text_blob(sanitized), eng.vault)
         in_system = _tokens_by_type(_p.system_text_blob(sanitized), eng.vault)
@@ -394,12 +535,12 @@ def cloak_sanitize_request(request: dict, session_id=None, api_mode: str = ""):
         return sanitized
     except Exception as exc:  # noqa: BLE001
         if m == "enforce" and _fail_closed():
-            _audit("blocked_send", repr(exc))
+            _audit("blocked_send", type(exc).__name__)
             try:
                 return _p.transform_request(request, lambda _s: _REDACTED)
             except Exception:
-                return {**request, "messages": [{"role": "user", "content": _REDACTED}]}
-        _audit("unfiltered_sent", repr(exc))
+                return _withheld_minimal(request)
+        _audit("unfiltered_sent", type(exc).__name__)
         return request
 
 
@@ -464,7 +605,7 @@ def cloak_restore_normalized(response):
     try:
         from hermescloak.restorer import leftover_tokens, restore_text
         eng = _engine_for_session(None)
-        vault = eng.vault
+        vault = _scoped(eng.vault, _scope(None), "response")
         prof = eng.profile
         tol = bool(prof.tolerant_restore)
         rc = _replay() if prof.replay_cache else None
@@ -485,7 +626,7 @@ def cloak_restore_normalized(response):
                     v = new
                 surfaces.append(v)
         for tc in list(getattr(response, "tool_calls", None) or []):
-            fn = getattr(tc, "function", None) or tc
+            fn = (tc.get("function") or tc) if isinstance(tc, dict) else (getattr(tc, "function", None) or tc)
             args = fn.get("arguments") if isinstance(fn, dict) else getattr(fn, "arguments", None)
             if isinstance(args, str):
                 model_texts.append(args)
@@ -500,6 +641,7 @@ def cloak_restore_normalized(response):
             arg_surfaces.append(str(new or ""))
         if rc is not None:
             rc.save()
+        _report_foreign(vault, "response")
         if prof.audit_new_pii:
             _audit_model_output(eng, model_texts)
         if vault.is_empty():
@@ -509,10 +651,14 @@ def cloak_restore_normalized(response):
                              for t in leftover_tokens(s, vault, "strict" if tol else False)})
         _audit("enforce_restore", json.dumps({"restored": True, "leftover": len(leftover)},
                                               ensure_ascii=False))
-        if leftover:
-            _audit("leftover_token", ",".join(leftover))
+        if leftover:   # types and a count only: a mangled token can wrap a real value (⟦⟦מייל_1⟧_7⟧)
+            known = set(vault.summary())
+            _audit("leftover_token", json.dumps(
+                {"count": len(leftover),
+                 "types": sorted({t[1:t.rindex("_")] if t[1:t.rindex("_")] in known else "?" for t in leftover})},
+                ensure_ascii=False))
     except Exception as exc:  # noqa: BLE001 — fail-open
-        _audit("restore_error", repr(exc))
+        _audit("restore_error", type(exc).__name__)
     return response
 
 
@@ -542,7 +688,7 @@ def cloak_restore_chat_response(response):
                 continue
             cloak_restore_normalized(_DictView(msg) if isinstance(msg, dict) else msg)
     except Exception as exc:  # noqa: BLE001
-        _audit("restore_error", repr(exc))
+        _audit("restore_error", type(exc).__name__)
     return response
 
 
@@ -554,13 +700,17 @@ def cloak_restore_text_for(agent, text):
     try:
         from hermescloak.restorer import restore_text
         eng = _engine_for(agent)
-        return restore_text(text, eng.vault, bool(eng.profile.tolerant_restore))
+        vault = _scoped(eng.vault, _scope(getattr(agent, "session_id", None)), "final_reply")
+        out = restore_text(text, vault, bool(eng.profile.tolerant_restore))
+        _report_foreign(vault, "final_reply")
+        return out
     except Exception:
         return text
 
 
-def cloak_restore_args_dict(args):
-    """Restore every string leaf of a tool-arguments dict (the ``tool_request`` backstop)."""
+def cloak_restore_args_dict(args, session_id=None):
+    """Restore every string leaf of a tool-arguments dict (the ``tool_request`` backstop) —
+    only the tokens ``session_id``'s requests showed the model."""
     if _mode() != "enforce" or not isinstance(args, dict):
         return args
     try:
@@ -569,7 +719,10 @@ def cloak_restore_args_dict(args):
             return args
         from hermescloak.restorer import restore_json
         eng = _engine_for_session(None)
-        return restore_json(args, eng.vault, "strict" if eng.profile.tolerant_restore else False)
+        vault = _scoped(eng.vault, _scope(session_id), "tool_request")
+        out = restore_json(args, vault, "strict" if eng.profile.tolerant_restore else False)
+        _report_foreign(vault, "tool_request")
+        return out
     except Exception:
         return args
 
@@ -604,7 +757,10 @@ def cloak_filter_stream_delta(agent, state, text):
         if not emit:
             return ""
         from hermescloak.restorer import restore_text
-        return restore_text(emit, _engine_for(agent).vault)
+        vault = _scoped(_engine_for(agent).vault, _scope(getattr(agent, "session_id", None)), "stream")
+        out = restore_text(emit, vault)
+        _report_foreign(vault, "stream")
+        return out
     except Exception:
         return text
 
@@ -617,7 +773,10 @@ def cloak_flush_stream(agent, state):
         if not held:
             return ""
         from hermescloak.restorer import restore_text
-        return restore_text(held, _engine_for(agent).vault) if _mode() == "enforce" else held
+        if _mode() != "enforce":
+            return held
+        vault = _scoped(_engine_for(agent).vault, _scope(getattr(agent, "session_id", None)), "stream")
+        return restore_text(held, vault)
     except Exception:
         return ""
 

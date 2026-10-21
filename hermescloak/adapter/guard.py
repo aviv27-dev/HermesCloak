@@ -22,18 +22,18 @@ class CloakGuard:
         try:
             return self._registry.get_or_create(session_id).sanitize_outbound(messages)
         except Exception as exc:  # noqa: BLE001 — fail-open is the whole point
-            self._pending.append(AlertEvent("unfiltered_sent", session_id, repr(exc)))
+            self._pending.append(AlertEvent("unfiltered_sent", session_id, type(exc).__name__))
             return messages  # unfiltered, by design
 
     def restore_inbound(self, response: dict, session_id: str) -> dict:
         try:
             restored, report = self._registry.get_or_create(session_id).restore_inbound(response)
             if report.leftover:
-                self._pending.append(
-                    AlertEvent("leftover_token", session_id, ",".join(report.leftover)))
+                self._pending.append(   # a count only: a mangled token can carry real text
+                    AlertEvent("leftover_token", session_id, str(len(report.leftover))))
             return restored
         except Exception as exc:  # noqa: BLE001
-            self._pending.append(AlertEvent("restore_error", session_id, repr(exc)))
+            self._pending.append(AlertEvent("restore_error", session_id, type(exc).__name__))
             return response
 
     def flush_alerts(self) -> list[AlertEvent]:

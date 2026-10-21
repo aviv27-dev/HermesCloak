@@ -241,7 +241,8 @@ def test_primary_falls_back_to_the_other_backend_and_says_so():
         d = D.Decider(env={"OPENROUTER_API_KEY": "k", "HERMESCLOAK_JEV_URL": jev.url,
                            "HERMESCLOAK_LOCAL_DECIDE_URL": dead.url, "HERMESCLOAK_DECIDE_BACKEND": "local"},
                       timeout_s=1.0)
-        r = d.decide("x:y", {}, Q)
+        assert d.decide("x:y", {}, Q)["ok"] is False            # default: local never falls back to a vendor
+        r = d.decide("x:y", {}, Q, fallback=True)
         assert r["ok"] and r["backend"] == "jev" and r["fell_back_from"] == "local"
         assert d.decide("x:y", {}, Q, fallback=False)["ok"] is False
     finally:
@@ -306,3 +307,10 @@ def test_low_flag_uses_the_chosen_options_probability(fake):
     # fake choice answers carry confidence 0.4 and probabilities {first: 0.4} → low under minConfidence 0.5
     r = _decider(fake).decide("x:y", {}, Q)
     assert r["answers"]["kind"]["low"] is True
+
+
+def test_key_is_never_sent_over_plain_http_or_through_a_redirect():
+    import pytest
+    with pytest.raises(ValueError):
+        D._http_post("http://vendor.example/v1", b"{}", {"Authorization": "Bearer k"}, 1.0)
+    assert D._NoRedirect().redirect_request(None, None, 302, "", {}, "https://evil.example/") is None

@@ -11,14 +11,21 @@ on:
   pull_request:
     types: [labeled, synchronize]
 
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash          # bash -eo pipefail: a failing command before | tee / | grep fails the step
+
 jobs:
   stock-install:
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'install-test')
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6
       - name: Install a stock hermes-agent (throwaway venv)
         run: WORK="$RUNNER_TEMP/sandbox" SANDBOX_INSTALL_ONLY=1 bash install/live_sandbox.sh
       - name: Install → shared runtime untouched → verify → test → remove → nothing left

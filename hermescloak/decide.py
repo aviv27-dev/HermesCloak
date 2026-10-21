@@ -11,7 +11,8 @@ Backends (``HERMESCLOAK_DECIDE_BACKEND`` / profile ``decide_backend``):
   local  a server you run that speaks the same shape at ``HERMESCLOAK_LOCAL_DECIDE_URL`` +
          ``/v1/systemone`` (default http://127.0.0.1:8012). Nothing leaves your network. Choice
          questions limited to 2–26 options there.
-  A primary that gives no answer falls back to the other backend when ``fallback`` is on.
+  A primary that gives no answer falls back to the other backend when ``fallback`` is on. By
+  default only jev → local falls back: a ``local`` primary never sends text to the vendor.
 
 Guarantees — the call never hurts the agent:
   * never raises: a bad input is ``{"ok": False, "reason": "invalid"}``;
@@ -49,6 +50,7 @@ import os
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import date
 
@@ -162,11 +164,26 @@ def brief(answers: dict | None) -> dict | None:
     return out
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect: urllib would re-send the Authorization header to the new host."""
+
+    def redirect_request(self, *a, **k):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
 def _http_post(url: str, body: bytes, headers: dict, timeout: float):
-    """(status, parsed-json-or-None). Raises on a transport error / timeout."""
+    """(status, parsed-json-or-None). Raises on a transport error / timeout. A key is only ever
+    sent over https (or to this machine), and redirects are not followed."""
+    if any(k.lower() == "authorization" for k in headers):
+        p = urllib.parse.urlsplit(url)
+        if p.scheme != "https" and p.hostname not in ("127.0.0.1", "localhost", "::1"):
+            raise ValueError("refusing to send an API key over plain http")
     req = urllib.request.Request(url, data=body, method="POST", headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _OPENER.open(req, timeout=timeout) as resp:
             raw = resp.read()
             status = resp.status
     except urllib.error.HTTPError as e:
@@ -188,7 +205,7 @@ class _Breaker:
 
 class Decider:
     def __init__(self, *, url: str | None = None, model: str | None = None, local_url: str | None = None,
-                 local_model: str | None = None, backend: str | None = None, fallback: bool = True,
+                 local_model: str | None = None, backend: str | None = None, fallback: bool | None = None,
                  calibration: dict | None = None, env=None, post=_http_post, now=time.monotonic,
                  timeout_s: float = DEFAULTS["timeout_s"], concurrency: int = DEFAULTS["concurrency"],
                  breaker_fails: int = DEFAULTS["breaker_fails"], breaker_s: float = DEFAULTS["breaker_s"],
@@ -288,7 +305,9 @@ class Decider:
         if bad:
             return {"ok": False, "reason": "invalid", "error": bad}
         primary = backend if backend in BACKENDS else self.backend()
-        fb = self._fallback if fallback is None else fallback
+        fb = fallback if fallback is not None else self._fallback
+        if fb is None:          # default: a vendor may fall back to your local model, never the reverse
+            fb = primary != "local"     # ("local" promises nothing leaves your network)
         other = "local" if primary == "jev" else "jev"
         tmo = max(0.05, float(timeout_s or self._timeout))
         out = self._one(primary, uc, state, questions, tmo)

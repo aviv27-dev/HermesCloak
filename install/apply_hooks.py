@@ -145,6 +145,7 @@ def _read(path):
 
 
 INCIDENTS = ("plugin_load_failed", "seam_missing", "unfiltered_sent", "blocked_send", "leftover_token", "restore_error",
+             "foreign_token", "restore_unscoped", "egress_blocked",
              "leaked_original", "config_error", "vault_locked", "vault_key_invalid", "vault_key_unreadable",
              "vault_crypto_unavailable", "vault_write_failed", "vault_corrupt_quarantined",
              "vault_lock_timeout", "vault_error", "ner_down")

@@ -134,21 +134,21 @@ const SAMPLE_RESP =
 `אכין מכתב התראה ל⟦לקוח_1⟧ (ת.ז ⟦תז_1⟧).
 אצור קשר בטלפון ⟦טלפון_1⟧ או במייל ⟦מייל_1⟧ בנוגע ל⟦תיק_1⟧.`;
 
-// per-tab session id (varies without Math.random by using performance time + a counter)
-const SESSION = "demo-" + Math.floor(performance.now()).toString(36) + "-" +
-                (window.history.length || 1);
-document.getElementById("sid").textContent = SESSION;
+// per-tab session id, issued by the server (unguessable: no other page can read this tab's vault)
+let SESSION = "";
+fetch("/api/session", { method:"POST", headers:{"Content-Type":"application/json"}, body:"{}" })
+  .then(r => r.json()).then(d => { SESSION = d.session; document.getElementById("sid").textContent = SESSION; });
 document.getElementById("src").value = SAMPLE_SRC;
 document.getElementById("resp").value = SAMPLE_RESP;
 
-const TOKEN_RE = /⟦[^_⟧]+_\d+⟧/g;
+const TOKEN_RE = /⟦[^_⟦⟧\n]{1,40}_\d{1,9}⟧/g;
 function esc(s){ return s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 function highlight(s){ return esc(s).replace(TOKEN_RE, m => `<span class="tok">${m}</span>`); }
 
 async function post(path, body){
   const r = await fetch(path, {
     method:"POST", headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({ ...body, session: SESSION })
+    body: JSON.stringify({ session: SESSION, ...body })
   });
   if(!r.ok) throw new Error("HTTP " + r.status);
   return r.json();

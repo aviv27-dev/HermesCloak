@@ -61,6 +61,8 @@ def load_token_map(hermes_home: str | None = None) -> dict[str, str]:
     key = _egress_key(hermes_home)
     token_to_real: dict[str, str] = {}
     for path in sorted(glob(os.path.join(_vault_dir(hermes_home), "*.json"))):
+        if os.path.exists(path + ".cleared"):          # cleared / expired on purpose: never resurrect
+            continue
         for candidate in (path, path + ".bak"):
             try:
                 data = read_payload(candidate, key)
@@ -93,10 +95,10 @@ def _audit_leftover(leftover: list[str], hermes_home: str | None, where: str) ->
     if not leftover:
         return
     try:
+        from hermescloak.fsutil import append_private
         log = os.path.join(_home(hermes_home), "cloak", "audit.log")
-        with open(log, "a", encoding="utf-8") as f:
-            f.write(json.dumps({"kind": "egress_leftover", "ts": time.strftime("%F %T"),
-                                "where": where, "tokens": leftover}, ensure_ascii=False) + "\n")
+        append_private(log, json.dumps({"kind": "egress_leftover", "ts": time.strftime("%F %T"),
+                                        "where": where, "count": len(leftover)}, ensure_ascii=False) + "\n")
     except Exception:
         pass
 

@@ -33,15 +33,16 @@ def _pth_content(home: str) -> str:
     fallback is wrong on Windows, so we hardcode the path resolved at install time).
     One physical 'import' line; site.py exec()s it; fully wrapped so it can't break startup."""
     cloak = os.path.join(home, "cloak")
-    return (
-        "# HermesCloak egress auto-loader: restore leaked tokens in outbound HTTP. Activates in an\n"
-        "# agent context (HERMES_HOME set OR the baked cloak dir exists). Fail-open; delete to disable.\n"
-        "import os; exec(\"try:\\n"
-        " _hm = os.environ.get('HERMES_HOME') or {home!r}\\n"
-        " if os.environ.get('HERMES_HOME') or os.path.isdir({cloak!r}):\\n"
-        "  import hermescloak.integrations.requests_egress as _h; _h.install(_hm)\\n"
-        "except Exception: pass\")\n"
-    ).format(home=home, cloak=cloak)
+    # the code is built first and quoted ONCE with repr(): a path with a quote, a backslash
+    # (Windows) or a newline can neither break out of the string nor stop the line from parsing
+    code = (f"try:\n"
+            f" _hm = os.environ.get('HERMES_HOME') or {home!r}\n"
+            f" if os.environ.get('HERMES_HOME') or os.path.isdir({cloak!r}):\n"
+            f"  import hermescloak.integrations.requests_egress as _h; _h.install(_hm)\n"
+            f"except Exception: pass\n")
+    return ("# HermesCloak egress auto-loader: restore leaked tokens in outbound HTTP. Activates in an\n"
+            "# agent context (HERMES_HOME set OR the baked cloak dir exists). Fail-open; delete to disable.\n"
+            f"import os; exec({code!r})\n")
 
 
 def _target_dir() -> str:

@@ -1,6 +1,8 @@
 """Maps a hermes session_id to its own Engine (and therefore its own per-session vault).
 
-Reset on a new session so the vault never grows unbounded and tokens never cross sessions."""
+Reset on a new session so the vault never grows unbounded and tokens never cross sessions
+(this legacy registry only; the hermes plugin shares one vault per agent and scopes restore per
+session instead, see adapter/hermes_live.py)."""
 from hermescloak.engine import Engine
 from hermescloak.entities import EntitySource
 from hermescloak.profile import Profile

@@ -8,10 +8,19 @@ no agent restart and no error.
 The model is freed from RAM via the service's /unload (or by stopping the service)."""
 import json
 import os
+import secrets
 import threading
 import time
+import urllib.parse
 import urllib.request
+
+from hermescloak.service import auth
 from hermescloak.span import Span
+
+# no proxy (a corporate proxy must never see unmasked text) and no redirects
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}),
+                                      type("_NoRedirect", (urllib.request.HTTPRedirectHandler,),
+                                           {"redirect_request": lambda *a, **k: None}))
 
 
 class NerServiceRecognizer:
@@ -19,8 +28,9 @@ class NerServiceRecognizer:
     # After a failure NER is skipped for `cooldown` seconds, then one probe is let through.
     def __init__(self, base_url: str = "http://127.0.0.1:8011",
                  timeout: float = 5.0, control_file: str | None = None,
-                 cooldown: float = 30.0, on_state_change=None) -> None:
+                 cooldown: float = 30.0, on_state_change=None, token: str | None = None) -> None:
         self._url = base_url.rstrip("/")
+        self._token = token
         self._timeout = timeout
         self._control_file = control_file  # optional live on/off without restart
         self._cooldown = cooldown
@@ -54,12 +64,22 @@ class NerServiceRecognizer:
             if time.monotonic() < self._open_until:
                 return []            # breaker open: skip NER instead of waiting on a dead service
         try:
+            token = self._token or auth.read_token()
+            if not token:
+                raise PermissionError("no NER token (see hermescloak/service/auth.py)")
+            # the service must prove it knows the token BEFORE it gets any text: a process squatting
+            # on the port while the service is down learns nothing
+            nonce = secrets.token_hex(16)
+            with _OPENER.open(self._url + "/hello?nonce=" + nonce, timeout=self._timeout) as resp:
+                got = json.loads(resp.read().decode("utf-8")).get("proof", "")
+            if not auth.same(got, auth.proof(token, nonce)):
+                raise PermissionError("NER service failed authentication")
             req = urllib.request.Request(
                 self._url + "/recognize",
                 data=json.dumps({"text": text}).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
+                headers={"Content-Type": "application/json", auth.HEADER: token},
             )
-            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+            with _OPENER.open(req, timeout=self._timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             spans = [Span(s["start"], s["end"], s["entity_type"], s["text"])
                      for s in data.get("spans", [])]

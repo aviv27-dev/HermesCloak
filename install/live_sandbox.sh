@@ -11,6 +11,9 @@ PY="${PY:-3.14}"   # hermes pins for 3.14 and its PM-managed runtime is 3.14: ke
 echo "[sandbox] work dir: $WORK"
 command -v uv >/dev/null || { echo "[sandbox] needs uv (https://docs.astral.sh/uv/)"; exit 2; }
 
+if [ "${SANDBOX_SKIP_INSTALL:-}" = "1" ]; then   # CI: installed by an earlier step that had no secrets
+  [ -x "$WORK/venv/bin/hermes" ] || { echo "[sandbox] SANDBOX_SKIP_INSTALL=1 but no install in $WORK"; exit 2; }
+else
 if [ ! -d "$WORK/hermes-agent" ]; then
   git clone -q --depth 50 https://github.com/NousResearch/hermes-agent.git "$WORK/hermes-agent"
 fi
@@ -31,6 +34,8 @@ EOF
 uv pip install -q -r "$WORK/reqs.txt"
 uv pip install -q --no-deps -e "$WORK/hermes-agent"
 uv pip install -q -e "$REPO[dev]"
+fi
+export VIRTUAL_ENV="$WORK/venv"
 if [ "${SANDBOX_INSTALL_ONLY:-}" = "1" ]; then
   echo "[sandbox] installed: $WORK/venv (hermes-agent at $WORK/hermes-agent)"
   exit 0

@@ -1,8 +1,10 @@
 import re
 
 OPEN, CLOSE = "⟦", "⟧"
-# type = one-or-more non-underscore, non-bracket chars; n = digits
-TOKEN_RE = re.compile(r"⟦([^_⟧]+)_(\d+)⟧")
+# type = 1–40 chars without underscore/brackets/newline; n = 1–9 digits. Both are bounded: the old
+# unbounded "[^_⟧]+" went quadratic on a run of "⟦" in hostile text (20 s on 50k chars), and it runs
+# on every request.
+TOKEN_RE = re.compile(r"⟦([^_⟦⟧\n]{1,40})_(\d{1,9})⟧")
 
 
 def make_token(entity_type: str, n: int) -> str:

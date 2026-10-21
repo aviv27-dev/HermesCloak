@@ -11,7 +11,7 @@ class FakeRec:
 
 
 def _start():
-    httpd, holder = serve(host="127.0.0.1", port=0, factory=lambda: FakeRec())
+    httpd, holder = serve(host="127.0.0.1", port=0, factory=lambda: FakeRec(), token="t")
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     return httpd, holder, httpd.server_address[1]
 
@@ -24,7 +24,7 @@ def _get(port, path):
 def _post(port, path, obj=None):
     req = urllib.request.Request(f"http://127.0.0.1:{port}{path}",
                                  data=json.dumps(obj or {}).encode("utf-8"),
-                                 headers={"Content-Type": "application/json"})
+                                 headers={"Content-Type": "application/json", "X-Cloak-Token": "t"})
     with urllib.request.urlopen(req, timeout=5) as r:
         return json.loads(r.read())
 

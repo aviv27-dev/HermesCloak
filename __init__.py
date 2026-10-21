@@ -67,21 +67,36 @@ def _home() -> str:
 
 
 def _mode() -> str:
+    """Same rules as hermes_live.parse_mode (this stand-in must work when the package can't load):
+    no file → off; unreadable, BOM, UTF-16 or unknown content → read safely, else enforce."""
     try:
-        with open(_os.path.join(_home(), "cloak", "MODE"), encoding="utf-8") as fh:
-            return fh.read().strip().lower()
-    except OSError:
+        with open(_os.path.join(_home(), "cloak", "MODE"), "rb") as fh:
+            raw = fh.read()
+    except FileNotFoundError:
         return "off"
+    except Exception:
+        return "enforce"
+    for enc in ("utf-8-sig", "utf-16"):
+        try:
+            m = raw.decode(enc).replace("\ufeff", "").replace("\x00", "").strip().lower()
+        except UnicodeError:
+            continue
+        if m in ("off", "shadow", "enforce"):
+            return m
+    return "enforce"
 
 
 def _audit(kind: str, detail: dict) -> None:
     try:
         d = _os.path.join(_home(), "cloak")
-        _os.makedirs(d, exist_ok=True)
+        _os.makedirs(d, mode=0o700, exist_ok=True)
         line = {"ts": _time.strftime("%Y-%m-%dT%H:%M:%S%z"), "kind": kind, "session_id": _home(),
                 "detail": _json.dumps(detail, ensure_ascii=False)}
-        with open(_os.path.join(d, "audit.log"), "a", encoding="utf-8") as fh:
-            fh.write(_json.dumps(line, ensure_ascii=False) + "\n")
+        fd = _os.open(_os.path.join(d, "audit.log"), _os.O_WRONLY | _os.O_APPEND | _os.O_CREAT, 0o600)
+        try:
+            _os.write(fd, (_json.dumps(line, ensure_ascii=False) + "\n").encode("utf-8"))
+        finally:
+            _os.close(fd)
     except Exception:
         pass
 

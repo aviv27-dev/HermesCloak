@@ -4,6 +4,7 @@ Per project decision: DURING a turn the guard is silent (it only buffers events)
 AFTER the turn `CloakGuard.flush_alerts()` dispatches them to every configured sink.
 A local audit log is always written; a Telegram sink is the deferred user alert."""
 import json
+import os
 import time
 from dataclasses import dataclass
 from typing import Protocol
@@ -37,11 +38,12 @@ class FileAuditAlerter:
         self._path = path
 
     def send(self, event: AlertEvent) -> None:
-        with open(self._path, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(
-                {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "kind": event.kind,
-                 "session_id": event.session_id, "detail": event.detail},
-                ensure_ascii=False) + "\n")
+        from hermescloak.fsutil import append_private, private_dir
+        private_dir(os.path.dirname(self._path))
+        append_private(self._path, json.dumps(
+            {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "kind": event.kind,
+             "session_id": event.session_id, "detail": event.detail},
+            ensure_ascii=False) + "\n")
 
 
 class CallbackAlerter:

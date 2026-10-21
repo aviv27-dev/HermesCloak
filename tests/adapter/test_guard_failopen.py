@@ -44,7 +44,7 @@ def test_restore_leftover_token_buffers_alert():
     g.sanitize_outbound([{"role": "user", "content": "שירה לוי"}], "s1")
     out = g.restore_inbound({"content": "⟦לקוח_1⟧ ⟦טלפון_9⟧", "tool_calls": []}, "s1")
     assert "שירה לוי" in out["content"]          # known token restored
-    assert g.pending[0].kind == "leftover_token" and "⟦טלפון_9⟧" in g.pending[0].detail
+    assert g.pending[0].kind == "leftover_token" and g.pending[0].detail == "1"   # a count, never the text
 
 def test_restore_exception_is_failopen():
     g = CloakGuard(_BoomRegistry(), alerters=[CollectingAlerter()])

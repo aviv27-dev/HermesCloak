@@ -36,6 +36,8 @@ import time
 import uuid
 from pathlib import Path
 
+from hermescloak.fsutil import private_dir
+
 from hermescloak._filelock import FileLock
 from hermescloak.vault import Vault
 
@@ -102,6 +104,8 @@ def _decrypt_line(key, line: bytes) -> dict:
             raise VaultLocked("journal: cryptography not installed") from exc
         except Exception as exc:          # wrong key: NEVER treat as a skippable bad line
             raise VaultLocked("journal: cannot decrypt") from exc
+    elif key:                             # a key is set: a plaintext line was not written by us
+        raise ValueError("plaintext journal line in an encrypted vault")
     obj = json.loads(line.decode("utf-8"))
     if not isinstance(obj, dict) or "t" not in obj or "r" not in obj:
         raise ValueError("bad journal entry")
@@ -420,7 +424,7 @@ class DurableVault(Vault):
         try:
             d = os.path.dirname(self.path)
             if d:
-                os.makedirs(d, exist_ok=True)
+                private_dir(d)
             raw = self._payload_bytes()
             # the SAME snapshot is written twice (backup first, then main), each atomically: a
             # crash or corruption of either copy leaves the other complete, and the journal is
@@ -447,9 +451,13 @@ class DurableVault(Vault):
                 os.remove(self.path + ".cleared")   # a fresh vault lifetime has begun
             except OSError:
                 pass
-            with open(self.journal_path, "wb") as jf:   # snapshot holds everything now
-                jf.flush()
-                os.fsync(jf.fileno())
+            # snapshot holds everything now: empty the journal (created 0600, never world-readable)
+            jfd = os.open(self.journal_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                os.fchmod(jfd, 0o600)
+                os.fsync(jfd)
+            finally:
+                os.close(jfd)
             self._joff = 0
             self._jlines = 0
         except Exception:
@@ -461,7 +469,7 @@ class DurableVault(Vault):
         try:
             d = os.path.dirname(self.journal_path)
             if d:
-                os.makedirs(d, exist_ok=True)
+                private_dir(d)
             line = _encrypt_line(self._key, {"t": token, "r": real, "k": entity_type, "n": n,
                                              "g": self.generation})
             fd = os.open(self.journal_path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)

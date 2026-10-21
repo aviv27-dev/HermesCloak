@@ -172,7 +172,7 @@ def test_tolerant_restore_and_mangled_leftover(home):
     nr = live.cloak_restore_normalized(_NR("א: ⟦לקוח 1⟧ ב: [לקוח_1] ג: ⟦לקוח 9⟧"))
     assert nr.content == "א: שירה לוי ב: שירה לוי ג: ⟦לקוח 9⟧"
     left = [e for e in _audit(home) if e["kind"] == "leftover_token"]
-    assert left and "⟦לקוח_9⟧" in left[-1]["detail"]
+    assert left and json.loads(left[-1]["detail"]) == {"count": 1, "types": ["לקוח"]}   # never the text
 
 
 def test_tolerant_restore_can_be_disabled(home):
