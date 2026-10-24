@@ -9,7 +9,7 @@ except ImportError:                      # inside hermes: its own YAML module (s
 class Profile:
     name: str
     languages: list[str] = field(default_factory=lambda: ["he", "en"])
-    fail_mode: str = "open"            # "open" | "closed"
+    fail_mode: str = "closed"          # "closed" (withhold the text) | "open" (send it unfiltered)
     never_mask: list[str] = field(default_factory=list)
     # institutional mail domains (suffix match) that are not personal data; [] masks every address
     never_mask_domains: list[str] = field(default_factory=lambda: ["gov.il", "muni.il", "knesset.il", "idf.il"])
@@ -39,7 +39,7 @@ class Profile:
         return cls(
             name=data.get("profile", "default"),
             languages=data.get("languages", ["he", "en"]),
-            fail_mode=data.get("fail_mode", "open"),
+            fail_mode=data.get("fail_mode", "closed"),
             never_mask=data.get("never_mask", []),
             never_mask_domains=list(data.get("never_mask_domains", ["gov.il", "muni.il", "knesset.il", "idf.il"]) or []),
             token_instruction=data.get("token_instruction", True),

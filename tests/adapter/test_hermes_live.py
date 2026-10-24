@@ -92,8 +92,17 @@ def test_stream_delta_noop_when_off(tmp_path, monkeypatch):
     _setup(tmp_path, monkeypatch, "off")
     assert live.cloak_filter_stream_delta(_FakeAgent("s1"), {}, "x ⟦לקוח_1⟧") == "x ⟦לקוח_1⟧"
 
-def test_enforce_failopen_on_engine_error(tmp_path, monkeypatch):
+def test_enforce_fails_closed_on_engine_error(tmp_path, monkeypatch):
     _setup(tmp_path, monkeypatch, "enforce")
     monkeypatch.setattr(live, "_engine_for_session", lambda sid: (_ for _ in ()).throw(RuntimeError("boom")))
     msgs = [{"role": "user", "content": "שירה לוי"}]
-    assert live.cloak_sanitize_outbound(_FakeAgent("s1"), msgs) is msgs   # fail-open -> original
+    out = live.cloak_sanitize_outbound(_FakeAgent("s1"), msgs)
+    assert "שירה לוי" not in json.dumps(out, ensure_ascii=False)          # default: withheld
+
+
+def test_enforce_failopen_when_profile_says_open(tmp_path, monkeypatch):
+    cloak = _setup(tmp_path, monkeypatch, "enforce")
+    (cloak / "profile.yaml").write_text("profile: example\nfail_mode: open\n", encoding="utf-8")
+    monkeypatch.setattr(live, "_engine_for_session", lambda sid: (_ for _ in ()).throw(RuntimeError("boom")))
+    msgs = [{"role": "user", "content": "שירה לוי"}]
+    assert live.cloak_sanitize_outbound(_FakeAgent("s1"), msgs) is msgs   # opt-in fail-open -> original

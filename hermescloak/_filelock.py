@@ -21,7 +21,7 @@ class FileLock:
             d = os.path.dirname(self.path)
             if d:
                 os.makedirs(d, exist_ok=True)
-            self._fh = open(self.path, "a+b")
+            self._fh = os.fdopen(os.open(self.path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o600), "a+b")
         except OSError:
             self._fh = None
             return self

@@ -16,6 +16,10 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash          # bash -eo pipefail: a failing command before | tee / | grep fails the step
+
 jobs:
   live:
     if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'live-test'
@@ -25,21 +29,30 @@ jobs:
       cancel-in-progress: true
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # the key is set per step (below), never job-wide: the install step runs third-party code
     env:
-      OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY || secrets.OLLAMA_TEST_KEY }}
+      WORK: ${{ github.workspace }}/../sandbox
       HC_LIVE_MODEL: ${{ inputs.model || vars.HC_LIVE_MODEL || 'gpt-oss:120b' }}
       MODEL: ${{ inputs.model || vars.HC_LIVE_MODEL || 'gpt-oss:120b' }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6
       - name: Check secret
+        env:
+          OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY || secrets.OLLAMA_TEST_KEY }}
         run: |
           if [ -z "$OLLAMA_API_KEY" ]; then
             echo "::error::Repository secret OLLAMA_API_KEY (or OLLAMA_TEST_KEY) is not set (Settings → Secrets and variables → Actions)"
             exit 1
           fi
       - name: Resolve model on Ollama Cloud
+        env:
+          OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY || secrets.OLLAMA_TEST_KEY }}
         run: |
           python3 install/ci_helpers.py check-model "$MODEL"
+      - name: Install hermes-agent + HermesCloak (no secrets in this step)
+        run: SANDBOX_INSTALL_ONLY=1 bash install/live_sandbox.sh
       - name: Live sandbox (offline e2e + real model)
-        run: bash install/live_sandbox.sh
+        env:
+          OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY || secrets.OLLAMA_TEST_KEY }}
+        run: SANDBOX_SKIP_INSTALL=1 bash install/live_sandbox.sh

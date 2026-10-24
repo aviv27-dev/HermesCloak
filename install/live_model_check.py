@@ -18,9 +18,11 @@ reply, the tool received real values, replay used, leftover count.
 Exit 0 = all hard checks passed.
 """
 import argparse
+import hmac
 import json
 import os
 import re
+import secrets
 import ssl
 import sys
 import tempfile
@@ -35,6 +37,7 @@ SECRET = "sk-" + "proj-" + "TEST" * 6          # a fake key, assembled so no sca
 REAL_VALUES = list(PII.values()) + [SECRET]
 SENT: list = []
 PROBE_CALLS: list = []
+RELAY_SECRET = secrets.token_urlsafe(24)      # the local relay adds the real key only for callers that know this
 
 
 def _ssl_ctx():
@@ -59,6 +62,11 @@ def _recorder(upstream: str, api_key: str):
                 pass                       # the client closed a keep-alive connection
 
         def _forward(self, method, body=None):
+            if not hmac.compare_digest(self.headers.get("Authorization", ""), "Bearer " + RELAY_SECRET):
+                self.send_response(403)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             path = self.path[len("/v1"):] if self.path.startswith("/v1") else self.path
             req = urllib.request.Request(upstream.rstrip("/") + path, data=body, method=method)
             req.add_header("Authorization", f"Bearer {api_key}")
@@ -86,7 +94,7 @@ def _recorder(upstream: str, api_key: str):
             self._forward("GET")
 
         def do_POST(self):
-            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            body = self.rfile.read(max(0, min(int(self.headers.get("Content-Length", 0) or 0), 20_000_000)))
             try:
                 SENT.append(json.loads(body))
             except ValueError:
@@ -114,7 +122,7 @@ def _register_probe():
 
 def _agent(port, model, session, deltas):
     from run_agent import AIAgent
-    return AIAgent(base_url=f"http://127.0.0.1:{port}/v1", api_key="via-recorder", model=model,
+    return AIAgent(base_url=f"http://127.0.0.1:{port}/v1", api_key=RELAY_SECRET, model=model,
                    provider="custom", api_mode="chat_completions", quiet_mode=True,
                    enabled_toolsets=["cloak_probe"], skip_context_files=True, skip_memory=True,
                    skip_background_review=True, session_id=session,

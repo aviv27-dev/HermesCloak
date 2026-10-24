@@ -52,16 +52,25 @@ _ARGS_DICT_KEYS = frozenset({"input", "arguments", "json", "args"})
 _ESCAPED_TOKEN = re.compile(r"\\u27e6((?:[^\\\"]|\\u[0-9a-fA-F]{4}){1,40}?)\\u27e7", re.IGNORECASE)
 
 
-def _walk(node: Any, fn: TextFn, mode: str, raw_args=None) -> Any:
+# Nesting deeper than this is not a real request: a prompt-injected tool call nested hundreds of
+# levels deep used to raise RecursionError, which sent the request out unfiltered. Past the limit the
+# whole subtree is masked as ONE string (its structure is lost; the provider may reject it).
+_MAX_DEPTH = 64
+
+
+def _walk(node: Any, fn: TextFn, mode: str, raw_args=None, depth: int = 0) -> Any:
     """mode: 'struct' (dict keys decide), 'text' (strings are text), 'args' (every leaf)."""
     if isinstance(node, str):
         return fn(node) if mode in ("text", "args") and node else node
+    if depth >= _MAX_DEPTH and isinstance(node, (list, dict)):
+        return fn(json.dumps(node, ensure_ascii=False))
+    depth += 1
     if isinstance(node, list):
-        out = [_walk(x, fn, mode, raw_args) for x in node]
+        out = [_walk(x, fn, mode, raw_args, depth) for x in node]
         return node if all(a is b for a, b in zip(out, node)) else out
     if isinstance(node, dict):
         if mode == "args":
-            out = {k: _walk(v, fn, "args") for k, v in node.items()}
+            out = {k: _walk(v, fn, "args", None, depth) for k, v in node.items()}
         else:
             if node.get("type") in _SKIP_TYPES:
                 return node
@@ -73,11 +82,11 @@ def _walk(node: Any, fn: TextFn, mode: str, raw_args=None) -> Any:
                     whole = raw_args(v) if raw_args is not None else None
                     out[k] = whole if whole is not None else transform_json_string(v, fn)
                 elif k in _ARGS_DICT_KEYS and isinstance(v, dict):
-                    out[k] = _walk(v, fn, "args")
+                    out[k] = _walk(v, fn, "args", None, depth)
                 elif k in _TEXT_KEYS and isinstance(v, str):
                     out[k] = fn(v) if v else v
                 elif isinstance(v, (dict, list)):
-                    out[k] = _walk(v, fn, "text" if k in _TEXT_KEYS or k == "input" else "struct", raw_args)
+                    out[k] = _walk(v, fn, "text" if k in _TEXT_KEYS or k == "input" else "struct", raw_args, depth)
                 else:
                     out[k] = v
         return node if all(out[k] is node[k] for k in node) else out

@@ -2,7 +2,10 @@ import re
 from hermescloak import phone as _phone
 from hermescloak.span import Span
 
-_EMAIL = re.compile(r"[A-Za-z0-9._%+\-]+@([A-Za-z0-9.\-]+\.[A-Za-z]{2,})")
+# Bounded parts and a left anchor: the unbounded form went quadratic on long runs of letters or
+# "a.a.a…" (hex dumps, minified data), several seconds per 50k chars.
+_EMAIL = re.compile(r"(?<![A-Za-z0-9._%+\-])[A-Za-z0-9._%+\-]{1,64}@"
+                    r"([A-Za-z0-9\-]{1,63}(?:\.[A-Za-z0-9\-]{1,63}){0,8}\.[A-Za-z]{2,24})(?![A-Za-z0-9\-])")
 # Institutional mailboxes (a court's automated sender, a ministry, a municipality) are not personal
 # data, and masking them costs a mail summary its sender. Suffix match on the domain; a person's
 # address at such a domain is still a name, and names are handled by the gazetteer / NER.
@@ -54,7 +57,7 @@ _PLATE = re.compile(r"(?<![\d-])(?:\d{3}-\d{2}-\d{3}|\d{2}-\d{3}-\d{2})(?![\d-])
 # Credentials (API keys, tokens, private keys). High-precision vendor formats only, plus a
 # key=value form whose VALUE (not the key name) is masked. Entity type "סוד" (secret).
 _SECRETS = re.compile(
-    r"-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----[\s\S]{20,}?-----END (?:[A-Z]+ )?PRIVATE KEY-----"
+    r"-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----[\s\S]{20,8192}?-----END (?:[A-Z]+ )?PRIVATE KEY-----"
     r"|\bsk-ant-[A-Za-z0-9_\-]{20,}"
     r"|\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_\-]{20,}"
     r"|\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"

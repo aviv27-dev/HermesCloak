@@ -20,7 +20,10 @@ The wraps are runtime patches applied when the plugin registers; each one checks
 target still exists and the result is written to ``$HERMES_HOME/cloak/audit.log`` as
 ``plugin_active`` (with any ``missing`` targets) so an incompatible hermes update is loud.
 ``python install/apply_hooks.py --verify --hermes-root <checkout>`` checks the same targets
-statically. Every wrap is MODE-scoped and fail-open (see hermes_live).
+statically. Every wrap is MODE-scoped. If the self-test fails or the auxiliary funnel cannot be
+wrapped, main-turn requests are withheld in enforce (unless the profile says ``fail_mode: open``).
+Auxiliary calls do not pass the request middleware: when their funnel is gone they cannot be
+covered at all, and withholding the main turn is what stops the conversation from going on.
 
 Install: ``hermes plugins install aviv27-dev/HermesCloak --enable`` (the repository root is a
          directory plugin; hermes' package manager installs this package into its managed
@@ -34,6 +37,7 @@ import inspect
 import json
 import logging
 import threading
+import uuid
 from types import SimpleNamespace
 
 logger = logging.getLogger("hermescloak")
@@ -41,6 +45,7 @@ logger = logging.getLogger("hermescloak")
 _MARK = "__hermescloak__"
 _PATCH_LOCK = threading.Lock()
 _STATUS: dict[str, str] = {}
+_DEGRADED: dict[str, str] = {}      # why the plugin cannot guarantee coverage (empty = fine)
 
 
 def _live():
@@ -52,6 +57,13 @@ def _live():
 
 def llm_request_middleware(request=None, session_id="", api_mode="", **_kw):
     """hermes ``llm_request`` middleware: return ``{"request": tokenized}`` or None (unchanged)."""
+    if _DEGRADED and isinstance(request, dict):
+        live = _live()
+        if live.mode() == "enforce" and live._fail_closed():
+            live._audit("blocked_send", json.dumps({"reason": "plugin_degraded", "why": sorted(_DEGRADED)}),
+                        every=60)
+            return {"request": live.withheld(request), "source": "hermescloak",
+                    "reason": "privacy plugin degraded (fail-closed in enforce)"}
     if not isinstance(request, dict):
         return None
     new = _live().cloak_sanitize_request(request, session_id=session_id or None, api_mode=api_mode or "")
@@ -70,7 +82,7 @@ def tool_request_middleware(tool_name=None, args=None, **_kw):
     approvals and execution see them."""
     if not isinstance(args, dict):
         return None
-    new = _live().cloak_restore_args_dict(args)
+    new = _live().cloak_restore_args_dict(args, session_id=_kw.get("session_id") or None)
     if new is args or new == args:
         return None
     _live()._audit("backstop_restore", json.dumps({"where": "tool_request", "tool": str(tool_name)}))
@@ -192,9 +204,11 @@ def _patch_streaming() -> str:
 def _aux_session_id() -> str:
     try:
         from agent.auxiliary_hooks import _parent_turn_identity
-        return _parent_turn_identity().get("session_id") or "aux"
+        sid = _parent_turn_identity().get("session_id")
     except Exception:
-        return "aux"
+        sid = ""
+    # no parent turn (cron, idle gateway work): a scope of its own, never one shared by all such calls
+    return sid or f"aux-{uuid.uuid4().hex}"
 
 
 def _patch_auxiliary() -> str:
@@ -280,6 +294,8 @@ def register(ctx) -> None:
     ok, why = live.self_test()
     st["self_test"] = "ok" if ok else f"error: {why}"
     missing = {k: v for k, v in st.items() if not v.startswith("ok")}
+    _DEGRADED.clear()
+    _DEGRADED.update({k: v for k, v in missing.items() if k in ("self_test", "auxiliary")})
     live._audit("plugin_active", json.dumps({"mode": live.mode(), "patches": st}, ensure_ascii=False))
     if missing:
         live._audit("seam_missing", json.dumps(missing, ensure_ascii=False))

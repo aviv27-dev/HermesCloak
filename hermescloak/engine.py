@@ -44,6 +44,7 @@ class Engine:
         self._cache_lock = threading.Lock()
 
     CONTENT_CACHE_MAX = 4096
+    CONTENT_CACHE_MAX_CHARS = 32_000_000     # ~64 MB of cached text per engine; big tool outputs add up
 
     def _tokenize_cached(self, content: str) -> str:
         # keyed by vault size too: a value learned later must be masked in older content as well
@@ -56,9 +57,13 @@ class Engine:
         out = pseudonymize(content, self.detection, self.vault)
         key = (content, len(getattr(self.vault, "_token_to_real", ())))
         with self._cache_lock:
+            if key not in self._content_cache:
+                self._cache_chars = getattr(self, "_cache_chars", 0) + len(content) + len(out)
             self._content_cache[key] = out
-            if len(self._content_cache) > self.CONTENT_CACHE_MAX:
-                self._content_cache.popitem(last=False)
+            while self._content_cache and (len(self._content_cache) > self.CONTENT_CACHE_MAX
+                                           or self._cache_chars > self.CONTENT_CACHE_MAX_CHARS):
+                (old, _), old_out = self._content_cache.popitem(last=False)
+                self._cache_chars -= len(old) + len(old_out)
         return out
 
     def tokenize_text(self, text: str) -> str:

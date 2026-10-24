@@ -209,13 +209,15 @@ def test_fail_closed_withholds_content(env, monkeypatch):
     assert "blocked_send" in (cloak / "audit.log").read_text(encoding="utf-8")
 
 
-def test_fail_open_default_sends_original(env, monkeypatch):
+def test_fail_closed_default_withholds(env, monkeypatch):
     _, ctx, _, cloak = env
     monkeypatch.setattr("hermescloak.engine.Engine.tokenize_text",
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")))
     req = {"messages": [{"role": "user", "content": "שירה לוי"}]}
-    assert _send(ctx, req) is req
-    assert "unfiltered_sent" in (cloak / "audit.log").read_text(encoding="utf-8")
+    out = _send(ctx, req)
+    assert "שירה לוי" not in json.dumps(out, ensure_ascii=False)
+    audit = (cloak / "audit.log").read_text(encoding="utf-8")
+    assert "blocked_send" in audit and "שירה" not in audit
 
 
 def test_missing_hermes_target_is_reported_not_raised(tmp_path, monkeypatch):
@@ -226,9 +228,18 @@ def test_missing_hermes_target_is_reported_not_raised(tmp_path, monkeypatch):
     del sys.modules["agent.auxiliary_client"]._relay_sync_completion   # simulate a hermes refactor
     import hermescloak.hermes_plugin as plugin
     monkeypatch.setattr(plugin, "_STATUS", {})
-    plugin.register(_Ctx())
+    ctx = _Ctx()
+    plugin.register(ctx)
     assert plugin.status()["auxiliary"].startswith("missing")
     assert "seam_missing" in (tmp_path / "cloak" / "audit.log").read_text(encoding="utf-8")
+    # auxiliary calls (titles, compression) would leak: in enforce the turn is withheld instead
+    (tmp_path / "cloak" / "MODE").write_text("enforce", encoding="utf-8")
+    (mw,) = ctx.middleware["llm_request"]
+    out = mw(request={"messages": [{"role": "user", "content": "שירה לוי"}]}, session_id="s1")
+    assert out and "שירה לוי" not in json.dumps(out, ensure_ascii=False)
+    (tmp_path / "cloak" / "profile.yaml").write_text("profile: x\nfail_mode: open\n", encoding="utf-8")
+    assert mw(request={"messages": [{"role": "user", "content": "שירה לוי"}]}, session_id="s1") is not None
+    plugin._DEGRADED.clear()
 
 
 def test_backstops_registered_and_restore(env):

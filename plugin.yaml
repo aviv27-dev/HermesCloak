@@ -4,7 +4,7 @@
 # repository's pyproject.toml alone, so the runtime environment hermes SHARES between all agents is never
 # rebuilt with HermesCloak inside. The package loads from this directory (see __init__.py).
 name: hermescloak
-version: "0.2.1"
+version: "0.3.0"
 description: >-
   Reversible PII pseudonymization for hermes-agent: identifying values (Hebrew-first) are replaced
   with ⟦TYPE_N⟧ tokens before any request reaches a cloud model and restored on the way back.

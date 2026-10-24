@@ -9,11 +9,17 @@ Run from the repo root:
 
     python -m demo.test_server
 
-then open http://127.0.0.1:8765
+then open http://127.0.0.1:8770
+
+Local only: it binds to 127.0.0.1, answers only requests addressed to a local host name (a
+DNS-rebinding page arrives with its own Host), takes JSON only (no form-post CSRF), and serves each
+browser tab an unguessable session id, so no other page can read back what was typed here.
 """
 import json
 import os
+import secrets
 import threading
+from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from hermescloak import Engine
@@ -33,8 +39,26 @@ _EX_BY_ID = {e["id"]: e for e in EXAMPLES}
 # Per-session Engine cache: sanitize then restore must share one Vault so tokens round-trip
 # (conceptually the same role as hermescloak/adapter/session_registry.py). build_engine()
 # wires the example profile + demo gazetteer + the live Hebrew NER (fail-open if down).
-_engines: dict[str, Engine] = {}
+_engines: "OrderedDict[str, Engine]" = OrderedDict()
+_issued: set[str] = set()
 _lock = threading.Lock()
+_MAX_SESSIONS = 256
+_MAX_BODY = 1_000_000
+_LOCAL_HOSTS = ("127.0.0.1", "localhost", "[::1]")
+
+
+def _new_session() -> str:
+    sid = secrets.token_hex(18)             # hex: never contains the "-r" sub-session separator
+    with _lock:
+        if len(_issued) > 10_000:
+            _issued.clear()
+        _issued.add(sid)
+    return sid
+
+
+def _known(session: str) -> bool:
+    """A session id the server issued (the page derives sub-sessions as "<id>-r…")."""
+    return session.split("-r", 1)[0] in _issued
 
 
 def _engine_for(session: str) -> Engine:
@@ -43,6 +67,10 @@ def _engine_for(session: str) -> Engine:
         if eng is None:
             eng = build_engine()
             _engines[session] = eng
+            while len(_engines) > _MAX_SESSIONS:
+                _engines.popitem(last=False)
+        else:
+            _engines.move_to_end(session)
         return eng
 
 
@@ -76,20 +104,34 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _read_json(self) -> dict:
-        n = int(self.headers.get("Content-Length") or 0)
+    def _read_json(self) -> dict | None:
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return None
+        if n < 0 or n > _MAX_BODY:
+            return None
         if not n:
             return {}
         try:
-            return json.loads(self.rfile.read(n) or b"{}")
+            data = json.loads(self.rfile.read(n) or b"{}")
         except Exception:
             return {}
+        return data if isinstance(data, dict) else {}
+
+    def _local(self) -> bool:
+        host = (self.headers.get("Host") or "").strip().lower()
+        name = host.split("]")[0] + "]" if host.startswith("[") else host.rsplit(":", 1)[0]
+        return name in _LOCAL_HOSTS
 
     def do_GET(self):
+        if not self._local():
+            self._send_json(403, {"error": "forbidden"})
+            return
         if self.path in ("/", "/index.html"):
             self._send_html(INDEX_PATH)
         elif self.path == "/health":
-            self._send_json(200, {"status": "ok", "sessions": len(_engines)})
+            self._send_json(200, {"status": "ok"})
         elif self.path == "/api/examples":
             # browsable list of the 100 QA cases (metadata only; run live via /api/run_example)
             self._send_json(200, {"examples": examples_meta(), "count": len(EXAMPLES)})
@@ -97,8 +139,20 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(404, {"error": "not found"})
 
     def do_POST(self):
+        if not self._local() or not (self.headers.get("Content-Type") or "").startswith("application/json"):
+            self._send_json(403, {"error": "forbidden"})
+            return
         data = self._read_json()
-        session = str(data.get("session") or "default")
+        if data is None:
+            self._send_json(413, {"error": "bad length"})
+            return
+        if self.path == "/api/session":
+            self._send_json(200, {"session": _new_session()})
+            return
+        session = str(data.get("session") or "")
+        if self.path != "/api/run_example" and not _known(session):
+            self._send_json(403, {"error": "unknown session; reload the page"})
+            return
 
         if self.path == "/api/sanitize":
             messages = data.get("messages") or []
@@ -125,7 +179,10 @@ class Handler(BaseHTTPRequestHandler):
 
         elif self.path == "/api/run_example":
             # run one of the 100 QA cases LIVE against a fresh engine; return verdict
-            ex = _EX_BY_ID.get(int(data.get("id") or 0))
+            try:
+                ex = _EX_BY_ID.get(int(data.get("id") or 0))
+            except (TypeError, ValueError):
+                ex = None
             if not ex:
                 self._send_json(404, {"error": "unknown example id"})
                 return
@@ -142,6 +199,8 @@ def main():
     # 8770 avoids ports commonly taken by agent services. Override with --port.
     ap.add_argument("--port", type=int, default=8770)
     args = ap.parse_args()
+    if args.host not in ("127.0.0.1", "::1", "localhost"):
+        raise SystemExit("the demo handles personal data in clear: it binds to 127.0.0.1 only")
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"HermesCloak demo serving on http://{args.host}:{args.port}  (Ctrl+C to stop)")
     try:

@@ -3,8 +3,8 @@
 # a broken edit is ignored (last good version kept, `config_error` in the audit log).
 profile: example
 languages: [he, en]
-fail_mode: open            # open (default): on an internal filter error send unfiltered + audit
-                           # closed: withhold the text instead (the turn fails, nothing leaks)
+fail_mode: closed          # closed (default): on an internal filter error withhold the text
+                           # (the turn fails, nothing leaks); open: send it unfiltered + audit
 alerts:
   channel: telegram
   on: [unfiltered_sent, leftover_token]

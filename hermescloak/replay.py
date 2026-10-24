@@ -14,7 +14,10 @@ re-tokenizing it.
 
 Safety:
   * Keys are hashes of the restored text; values are the MODEL's (tokenized) text — the file
-    holds no value the cloud model didn't already see.
+    holds no value the cloud model didn't already see. With an encrypted vault the hash is an
+    HMAC keyed from the vault key: a plain hash of a known template would let anyone who copies
+    the cloak dir brute-force short values (a phone, an ID) offline.
+  * Entries of an older vault generation are dropped when the cache is saved.
   * Entries carry the vault generation: after the vault expires/clears, old entries (whose
     tokens the new vault can't restore) are ignored.
   * A replayed value is only used if every token in it is still restorable.
@@ -23,6 +26,7 @@ Safety:
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import tempfile
@@ -33,14 +37,18 @@ MAX_ENTRIES = 4000
 MAX_VALUE_CHARS = 200_000
 
 
-def _h(s: str) -> str:
-    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+def _digest(s: str, secret: bytes | None) -> str:
+    b = s.encode("utf-8", "surrogatepass")          # a lone surrogate must not raise
+    return hmac.new(secret, b, "sha256").hexdigest() if secret else hashlib.sha256(b).hexdigest()
 
 
 class ReplayCache:
-    def __init__(self, path: str | None = None, max_entries: int = MAX_ENTRIES) -> None:
+    def __init__(self, path: str | None = None, max_entries: int = MAX_ENTRIES,
+                 secret: bytes | None = None) -> None:
         self.path = path
         self.max_entries = max_entries
+        self._secret = secret
+        self._gen: str | None = None                 # the live vault generation, last seen
         self._d: "OrderedDict[str, tuple[str, str]]" = OrderedDict()   # hash -> (generation, model_text)
         self._lock = threading.Lock()
         self._dirty = False
@@ -64,8 +72,9 @@ class ReplayCache:
         if restored == model_text or not restored or len(model_text) > MAX_VALUE_CHARS:
             return
         with self._lock:
-            self._d[_h(restored)] = (generation, model_text)
-            self._d.move_to_end(_h(restored))
+            self._gen = generation
+            self._d[self._h(restored)] = (generation, model_text)
+            self._d.move_to_end(self._h(restored))
             while len(self._d) > self.max_entries:
                 self._d.popitem(last=False)
             self._dirty = True
@@ -74,11 +83,15 @@ class ReplayCache:
         if not isinstance(restored, str) or not restored:
             return None
         with self._lock:
-            hit = self._d.get(_h(restored))
+            self._gen = generation
+            hit = self._d.get(self._h(restored))
             if hit is None or hit[0] != generation:
                 return None
-            self._d.move_to_end(_h(restored))
+            self._d.move_to_end(self._h(restored))
             return hit[1]
+
+    def _h(self, s: str) -> str:
+        return _digest(s, self._secret)
 
     def __len__(self) -> int:
         return len(self._d)
@@ -110,13 +123,16 @@ class ReplayCache:
                 for k, v in self._d.items():
                     disk.pop(k, None)
                     disk[k] = v
+                if self._gen is not None:            # an expired/cleared vault's entries are dead weight
+                    disk = OrderedDict((k, v) for k, v in disk.items() if v[0] == self._gen)
                 while len(disk) > self.max_entries:
                     disk.popitem(last=False)
                 self._d = disk
                 entries = [[k, list(v)] for k, v in self._d.items()]
                 self._dirty = False
             d = os.path.dirname(self.path)
-            os.makedirs(d, exist_ok=True)
+            from hermescloak.fsutil import private_dir
+            private_dir(d)
             fd, tmp = tempfile.mkstemp(dir=d, prefix=".replay-", suffix=".tmp")
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as f:

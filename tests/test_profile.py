@@ -17,7 +17,7 @@ def test_profile_from_yaml(tmp_path):
     prof = Profile.from_yaml(str(p))
     assert prof.name == "example"
     assert prof.languages == ["he", "en"]
-    assert prof.fail_mode == "open"
+    assert prof.fail_mode == "open"            # explicit in the yaml above
     assert prof.never_mask == ["בית המשפט"]
     assert prof.token_instruction is True
 
@@ -25,6 +25,6 @@ def test_profile_defaults(tmp_path):
     p = tmp_path / "min.yaml"
     p.write_text("profile: x\n", encoding="utf-8")
     prof = Profile.from_yaml(str(p))
-    assert prof.fail_mode == "open"          # default per spec §6
+    assert prof.fail_mode == "closed"        # default: a filter error withholds, never leaks
     assert prof.languages == ["he", "en"]    # default
     assert prof.never_mask == []

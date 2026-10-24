@@ -65,10 +65,15 @@ NER adds names that are on no list. It runs as **one shared local service for al
 own Python environment, never inside hermes:
 
 ```bash
-python3 -m venv ~/cloak-ner && ~/cloak-ner/bin/pip install "transformers>=4.40" "torch>=2.0" pyyaml
+python3 -m venv ~/cloak-ner && ~/cloak-ner/bin/pip install "transformers>=5.10" "torch>=2.13" pyyaml
 cd ~/.hermes/plugins/hermescloak && ~/cloak-ner/bin/python -m hermescloak.service.ner_service --port 8011
 echo http://127.0.0.1:8011 > ~/.hermes/cloak/ner_url        # per agent; applies live
 ```
+
+The service binds to 127.0.0.1 only. On first start it creates a random token in
+`~/.config/hermescloak/ner.token` (0600; `HERMESCLOAK_NER_TOKEN_FILE` to move it). Agents running as
+the same user find it automatically. The service must prove it knows the token before an agent sends
+it any text, so a process that grabs the port while the service is down gets nothing.
 
 When the service is down or slow, a circuit breaker skips NER for 30 s after one timeout
 (`ner_down` / `ner_up` in the audit log). Messages keep flowing, protected by everything except
